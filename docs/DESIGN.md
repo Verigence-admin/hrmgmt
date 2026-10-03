@@ -108,7 +108,7 @@ The CEO can act at any step. HR sees everything but only approves what is assign
 
 **Security** (changes in the Security repo): module `hr` with permissions and module roles HRADMIN, FINANCEADMIN, CEO. FinanceAdmin and HRAdmin role definitions already exist under the old `attendance` module; the new ones are created under `hr` and the old attendance RBAC data is retired with the PC attendance removal (section 12).
 
-**Audit Core** (one small additive change): a read-only, service-to-service endpoint that returns, for a given Security user and project, the active operating role and, for PCs, the assigned outlets with coordinates; and one that lists the project's TL and PM users. This is the logic the old `attendance_context.py` had, now exposed to HRMgmt only. No HR logic enters Audit Core.
+**Audit Core** (one small additive change, see section 15 for the isolation rules): a read-only, service-to-service endpoint that returns, for a given project, the active project roles, the assigned outlets with coordinates, and the TL and PM users. HRMgmt pulls it on a schedule and keeps its own copy, so no HR request ever waits on Audit Core. No HR logic enters Audit Core.
 
 **Web** (changes in the Web repo): HR screens under `/hr`, with the navigation shown by role. All employee screens are mobile-first. A shared client for the HRMgmt API.
 
@@ -170,3 +170,12 @@ Each phase is deployed and checked on DEV before the next starts.
   The calendar carries a status per date (tentative or declared); only declared holidays count as
   non-working days, and the screens say "Tentative. Final holidays are declared by HR" until HR
   declares them.
+
+## 16. The HR module must not affect Audit Core (rules, 3 October 2026)
+
+1. **Separate process.** HRMgmt runs as its own Railway service. It shares no CPU, memory or worker with Audit Core.
+2. **Audit Core is never in an HR request path.** Attendance, leave, claims and payroll never call Audit Core while a person waits. HRMgmt keeps its own copy of project roles, assigned outlets and TL/PM lists, refreshed by one scheduled pull per day plus an HR "Refresh" button. If Audit Core is slow or down, HR keeps working on the last copy and shows how old it is. One call per project, a short timeout, no retries.
+3. **Audit Core side stays tiny:** one read-only endpoint, one indexed query per project, service-token only, statement timeout, no writes, no new tables, no changes to existing code paths.
+4. **Database isolation.** Recommended: HR uses its own database (its own Neon compute and connection limit), not the shared `neondb`, so a payroll run can never slow Audit Core queries or use its connections. The code needs no change for this: it only reads `DATABASE_URL`. Until that exists, HR is capped at 10 connections and runs heavy work (payroll) outside working hours.
+5. **Web.** HR screens are a separate, lazily loaded part of the app; the audit screens do not load HR code.
+6. **Security.** HR permission checks go to Security with a 60 second reuse of an ALLOW. For about 40 people this is a handful of calls per minute.
