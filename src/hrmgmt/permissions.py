@@ -10,6 +10,7 @@ from __future__ import annotations
 
 HR_EMPLOYEE_READ = "hr.employee.read"
 HR_EMPLOYEE_MANAGE = "hr.employee.manage"
+HR_SENSITIVE_READ = "hr.sensitive.read"
 HR_AUDIT_READ = "hr.audit.read"
 HR_SETTINGS_MANAGE = "hr.settings.manage"
 
@@ -18,6 +19,7 @@ HR_SETTINGS_MANAGE = "hr.settings.manage"
 ALL_PERMISSIONS: tuple[str, ...] = (
     HR_EMPLOYEE_READ,
     HR_EMPLOYEE_MANAGE,
+    HR_SENSITIVE_READ,
     HR_AUDIT_READ,
     HR_SETTINGS_MANAGE,
 )

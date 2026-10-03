@@ -197,3 +197,17 @@ Each phase is deployed and checked on DEV before the next starts.
 - Nothing is public. HR files are transferred through the HRMgmt service (server to bucket), not directly from the browser, so **the bucket's CORS settings do not change** and Audit Core's upload path is not touched. Identity documents (PAN, Aadhaar, bank proof) are streamed by HRMgmt only after the permission check, and each view is written to the audit log. Receipts and payslips follow the same rule.
 - Settings: `HR_STORAGE_ENDPOINT`, `HR_STORAGE_BUCKET`, `HR_STORAGE_ACCESS_KEY_ID`, `HR_STORAGE_SECRET_ACCESS_KEY`, `HR_STORAGE_REGION`, set on the HRMgmt service (see `.env.example`).
 - Security note: a key that can read the bucket can read every prefix in it. HR holds the most sensitive files in the system, so HR should get its own access key for this bucket, separate from Audit Core's, so either key can be rotated without touching the other. Whether the provider can limit a key to the `hr/` prefix alone is to be confirmed in the provider's console; if it can, we use that.
+
+## 19. Employee creation also creates the Verigence login (3 October 2026)
+
+Decisions: company details, statutory settings, salary templates and the remaining employees come later. A missing or duplicate PAN does not block creating an employee: the record is created and flagged for HR to correct. Creating an employee also creates their Verigence login by default, with an account on the employee's email and a system-generated password, and no OTP step.
+
+How it works:
+1. HR creates the employee. The record is saved first and committed.
+2. HRMgmt generates a strong random 16-character password and asks Security to create the user. HRMgmt makes one attempt only; no automatic retry.
+3. On success the employee is linked to the Security user and the password is shown once on HR's screen so it can be handed over. It is never stored, logged or written to the audit log. The employee then changes it with the existing "forgot password" flow.
+4. On any failure the employee is kept and the login shows "failed" with a reason HR can act on (email or mobile already registered, mobile missing or not a valid Indian number, Security unreachable, not permitted). HR presses "Create login" to try again when ready. A login problem never loses an employee.
+
+**Security side (not yet built; needs its own approval before merging to Security `dev`):** Security already has a SuperAdmin-only call that creates an ACTIVE user with a verified email and a given password, with no OTP (`POST /security/v1/platform/users`). It needs a human SuperAdmin token, so HRMgmt cannot use it. The agreed addition is a service-to-service twin, `POST /security/v1/service/users`, callable only by the HRMgmt service identity, with the same body (`firstName`, `lastName`, `email`, `mobile`, `password`) and the same response (`userId`, ...), 201 on success, 409 if the email or mobile is registered, 422 if not valid. HRMgmt is already written against this contract and tested with a fake.
+
+Data rules: PAN is not unique in the database. A missing PAN, a duplicate PAN, a missing Aadhaar and a missing mobile show as flags on the employee. The API still refuses a PAN or Aadhaar that is present but malformed, and the import (next step) loads such a value as empty with a flag.

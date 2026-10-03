@@ -62,7 +62,7 @@ class SecurityAuthorizer:
         self._token_client.close()
         self._client.close()
 
-    def _service_token(self) -> str:
+    def service_token(self) -> str:
         with self._token_lock:
             if self._token and time.monotonic() < self._token_until:
                 return self._token
@@ -107,7 +107,7 @@ class SecurityAuthorizer:
                     return True
                 self._allow.pop(key, None)
 
-        token = self._service_token()
+        token = self.service_token()
         try:
             response = self._client.post(
                 "/security/v1/authorization/check",

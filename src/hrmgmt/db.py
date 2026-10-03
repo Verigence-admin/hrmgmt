@@ -23,6 +23,14 @@ def get_engine() -> Engine:
 
 
 def get_conn() -> Iterator[Connection]:
-    """One transaction per request: commit when the handler returns, roll back on any error."""
-    with get_engine().begin() as conn:
-        yield conn
+    """One transaction per request: committed when the handler returns, rolled back on any error.
+    A handler that must call another service may `conn.commit()` first, so the database is
+    never held in an open transaction across a network call."""
+    with get_engine().connect() as conn:
+        try:
+            yield conn
+        except BaseException:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
