@@ -1,0 +1,9 @@
+[build]
+builder = "railpack"
+
+[deploy]
+preDeployCommand = ["sh -c 'set -eu; PYTHONPATH=src alembic heads; PYTHONPATH=src alembic upgrade head'"]
+startCommand = "PYTHONPATH=src uvicorn hrmgmt.main:app_factory --factory --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/health"
+healthcheckTimeout = 100
+restartPolicyType = "ON_FAILURE"

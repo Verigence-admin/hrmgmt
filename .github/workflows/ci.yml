@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: hr
+          POSTGRES_PASSWORD: hr
+          POSTGRES_DB: hrtest
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U hr"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://hr:hr@localhost:5432/hrtest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e ".[test,lint]" cryptography
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Types
+        run: mypy src
+      - name: Tests (includes fresh-database migration tests)
+        run: pytest -q
