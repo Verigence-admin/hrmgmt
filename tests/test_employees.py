@@ -13,6 +13,7 @@ from hrmgmt.config import Settings
 from hrmgmt.main import create_app
 from hrmgmt.passwords import generate_initial_password
 from hrmgmt.provisioning import CreatedLogin, ProvisioningError, SecurityUserProvisioner
+from hrmgmt.storage import StorageError
 from tests.test_api import FakeAuthorizer, FakeValidator
 
 HR = str(uuid.uuid4())
@@ -30,6 +31,22 @@ GRANTS = {
         perm.HR_AUDIT_READ,
     },
 }
+
+
+class FakeStorage:
+    def __init__(self, fail: bool = False):
+        self.fail = fail
+        self.objects: dict[str, tuple[bytes, str]] = {}
+
+    def put(self, key, data, content_type):
+        if self.fail:
+            raise StorageError("down")
+        self.objects[key] = (data, content_type)
+
+    def get(self, key):
+        if self.fail:
+            raise StorageError("down")
+        return self.objects[key][0]
 
 
 class FakeProvisioner:
@@ -54,6 +71,11 @@ def _settings() -> Settings:
         security_audience="",
         security_client_id="",
         security_client_secret="",
+        storage_endpoint="",
+        storage_bucket="",
+        storage_access_key_id="",
+        storage_secret_access_key="",
+        storage_region="auto",
         allowed_origins=(),
         db_pool_size=2,
         db_max_overflow=0,
@@ -62,12 +84,15 @@ def _settings() -> Settings:
 
 @pytest.fixture()
 def make_client(migrated_engine):
-    def build(provisioner="default") -> tuple[TestClient, FakeProvisioner | None]:
+    def build(
+        provisioner="default", storage="default"
+    ) -> tuple[TestClient, FakeProvisioner | None]:
         app = create_app(_settings())
         app.state.validator = FakeValidator()
         app.state.authorizer = FakeAuthorizer(GRANTS)
         prov = FakeProvisioner() if provisioner == "default" else provisioner
         app.state.provisioner = prov
+        app.state.storage = FakeStorage() if storage == "default" else storage
         return TestClient(app, raise_server_exceptions=False), prov
 
     return build
@@ -462,3 +487,321 @@ def test_provisioner_maps_failures_and_never_retries(status, code):
         )
     assert exc.value.code == code and len(sent) == 1
     assert "pw" not in str(exc.value)
+
+
+# ---- more onboarding fields and qualifications -------------------------------------------
+
+
+def full_profile(**over):
+    return payload(
+        state="odisha",
+        pincode="751001",
+        total_experience_years=3.5,
+        emergency_contact_name="Ravi Rao",
+        emergency_contact_number="+91 91234 56789",
+        emergency_contact_address="12 Station Road, Cuttack",
+        qualifications=[
+            {"degree_code": "BCOM", "percentage": 72.5, "year_of_passing": 2020},
+            {"degree_code": "MBA", "percentage": 68, "year_of_passing": 2022},
+        ],
+        **over,
+    )
+
+
+def test_create_with_full_profile_and_two_qualifications(make_client):
+    client, _ = make_client()
+    r = client.post("/hr/v1/employees", json=full_profile(), headers=auth(HR))
+    assert r.status_code == 201
+    emp = r.json()["employee"]
+    assert emp["state"] == "Odisha" and emp["pincode"] == "751001"
+    assert emp["totalExperienceYears"] == 3.5
+    assert emp["emergencyContactNumber"] == "9123456789"
+    assert emp["emergencyContactAddress"] == "12 Station Road, Cuttack"
+    quals = emp["qualifications"]
+    assert [q["degreeCode"] for q in quals] == ["MBA", "BCOM"]  # newest first
+    assert quals[0]["level"] == "MASTER" and quals[0]["percentage"] == 68.0
+    assert (
+        quals[1]["degree"] == "Bachelor of Commerce (B.Com.)" and quals[1]["yearOfPassing"] == 2020
+    )
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"state": "Atlantis"},
+        {"pincode": "012345"},
+        {"pincode": "7510"},
+        {"total_experience_years": -1},
+        {"total_experience_years": 61},
+        {"emergency_contact_number": "12345"},
+        {"qualifications": [{"degree_code": "BCOM", "percentage": 101, "year_of_passing": 2020}]},
+        {"qualifications": [{"degree_code": "BCOM", "percentage": 50, "year_of_passing": 1900}]},
+        {"qualifications": [{"degree_code": "BCOM", "percentage": 50, "year_of_passing": 2999}]},
+        {"qualifications": [{"degree_code": "OTHER", "percentage": 50, "year_of_passing": 2020}]},
+    ],
+)
+def test_invalid_profile_values_are_refused(make_client, over):
+    client, _ = make_client()
+    r = client.post("/hr/v1/employees", json=payload(**over), headers=auth(HR))
+    assert r.status_code == 422 and r.json()["code"] == "HR_VALIDATION_FAILED"
+
+
+def test_unknown_degree_rolls_back_the_whole_employee(make_client, migrated_engine):
+    client, _ = make_client()
+    body = payload(
+        qualifications=[{"degree_code": "NOPE", "percentage": 50, "year_of_passing": 2020}]
+    )
+    r = client.post("/hr/v1/employees", json=body, headers=auth(HR))
+    assert r.status_code == 409 and r.json()["code"] == "DEGREE_UNKNOWN"
+    with migrated_engine.connect() as conn:
+        n = conn.execute(
+            text("SELECT count(*) FROM hr.employee WHERE employee_code = :c"),
+            {"c": body["employee_code"]},
+        ).scalar_one()
+    assert n == 0
+
+
+def test_other_degree_is_recorded_by_name(make_client):
+    client, _ = make_client()
+    body = payload(
+        qualifications=[
+            {
+                "degree_code": "OTHER",
+                "degree_other": " Diploma in  Surveying ",
+                "percentage": 80,
+                "year_of_passing": 2019,
+            }
+        ]
+    )
+    emp = client.post("/hr/v1/employees", json=body, headers=auth(HR)).json()["employee"]
+    assert emp["qualifications"][0]["degree"] == "Diploma in Surveying"
+
+
+def test_catalogues_cover_bachelors_and_masters_and_all_states(make_client):
+    client, _ = make_client()
+    degrees = client.get("/hr/v1/degrees", headers=auth(NOBODY)).json()
+    levels = {d["level"] for d in degrees}
+    codes = {d["code"] for d in degrees}
+    assert levels == {"BACHELOR", "MASTER", "OTHER"}
+    assert {"BA", "BSC", "BCOM", "BBA", "BCA", "BTECH", "BE", "LLB", "MBBS", "BPHARM"} <= codes
+    assert {"MA", "MSC", "MCOM", "MBA", "MCA", "MTECH", "LLM", "MD", "MPHARM"} <= codes
+    assert len(codes) == len(degrees)
+    states = client.get("/hr/v1/states", headers=auth(NOBODY)).json()
+    assert len(states) == 36 and "Odisha" in states and "Delhi" in states
+    assert client.get("/hr/v1/degrees").status_code == 401
+
+
+def test_qualification_add_replace_remove_with_audit(make_client, migrated_engine):
+    client, _ = make_client()
+    eid = client.post("/hr/v1/employees", json=payload(), headers=auth(HR)).json()["employee"][
+        "employeeId"
+    ]
+    base = f"/hr/v1/employees/{eid}/qualifications"
+    added = client.post(
+        base,
+        json={"degree_code": "BTECH", "percentage": 81.25, "year_of_passing": 2021},
+        headers=auth(HR),
+    )
+    assert added.status_code == 201
+    qid = added.json()["qualifications"][0]["qualificationId"]
+    changed = client.put(
+        f"{base}/{qid}",
+        json={"degree_code": "BE", "percentage": 82, "year_of_passing": 2021},
+        headers=auth(HR),
+    )
+    assert changed.json()["qualifications"][0]["degreeCode"] == "BE"
+    assert (
+        client.put(
+            f"{base}/{uuid.uuid4()}",
+            json={"degree_code": "BE", "percentage": 82, "year_of_passing": 2021},
+            headers=auth(HR),
+        ).status_code
+        == 404
+    )
+    gone = client.delete(f"{base}/{qid}", headers=auth(HR))
+    assert gone.json()["qualifications"] == []
+    assert client.delete(f"{base}/{qid}", headers=auth(HR)).status_code == 404
+    actions = [a for a, _ in audit_rows(migrated_engine, eid)]
+    assert actions[-3:] == ["QUALIFICATION_ADDED", "QUALIFICATION_UPDATED", "QUALIFICATION_REMOVED"]
+    assert (
+        client.post(
+            base,
+            json={"degree_code": "BE", "percentage": 50, "year_of_passing": 2021},
+            headers=auth(HR_READER),
+        ).status_code
+        == 403
+    )
+
+
+def test_qualification_of_another_employee_cannot_be_touched_through_a_wrong_id(make_client):
+    client, _ = make_client()
+    a = client.post("/hr/v1/employees", json=full_profile(), headers=auth(HR)).json()["employee"]
+    b = client.post("/hr/v1/employees", json=payload(), headers=auth(HR)).json()["employee"]
+    qid = a["qualifications"][0]["qualificationId"]
+    r = client.delete(f"/hr/v1/employees/{b['employeeId']}/qualifications/{qid}", headers=auth(HR))
+    assert r.status_code == 404
+    still = client.get(f"/hr/v1/employees/{a['employeeId']}", headers=auth(HR)).json()
+    assert len(still["qualifications"]) == 2
+
+
+def test_employee_edits_own_state_pincode_and_emergency_address_but_not_qualifications(
+    make_client, migrated_engine
+):
+    client, _ = make_client()
+    emp, me = _linked_employee(client, migrated_engine)
+    r = client.patch(
+        "/hr/v1/me/employee",
+        json={
+            "state": "West Bengal",
+            "pincode": "700001",
+            "emergency_contact_address": "5 Park St",
+        },
+        headers=auth(me),
+    )
+    assert r.status_code == 200
+    assert r.json()["state"] == "West Bengal" and r.json()["emergencyContactAddress"] == "5 Park St"
+    for forbidden in ({"total_experience_years": 20}, {"qualifications": []}):
+        assert (
+            client.patch("/hr/v1/me/employee", json=forbidden, headers=auth(me)).status_code == 422
+        )
+    assert (
+        client.post(
+            f"/hr/v1/employees/{emp['employeeId']}/qualifications",
+            json={"degree_code": "BE", "percentage": 50, "year_of_passing": 2021},
+            headers=auth(me),
+        ).status_code
+        == 403
+    )
+
+
+# ---- profile photo ---------------------------------------------------------------------------
+
+
+def _jpeg_with_gps(size=(1600, 1200)) -> bytes:
+    import io
+
+    from PIL import Image
+
+    image = Image.new("RGB", size, (200, 30, 30))
+    exif = Image.Exif()
+    exif[0x010F] = "SecretCameraMake"
+    gps = exif.get_ifd(0x8825)
+    gps[1], gps[2] = "N", (20.0, 17.0, 0.0)
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", exif=exif)
+    return buffer.getvalue()
+
+
+def test_photo_is_resized_stripped_of_metadata_and_served_back(make_client, migrated_engine):
+    import io
+
+    from PIL import Image
+
+    storage = FakeStorage()
+    client, _ = make_client(storage=storage)
+    emp, me = _linked_employee(client, migrated_engine)
+    raw = _jpeg_with_gps()
+    assert b"SecretCameraMake" in raw
+    r = client.post(
+        "/hr/v1/me/employee/photo", files={"file": ("me.jpg", raw, "image/jpeg")}, headers=auth(me)
+    )
+    assert r.status_code == 200 and r.json()["hasPhoto"] is True
+    stored, content_type = storage.objects[f"employee/{emp['employeeId']}/photo.jpg"]
+    assert content_type == "image/jpeg" and b"SecretCameraMake" not in stored
+    image = Image.open(io.BytesIO(stored))
+    assert max(image.size) == 512 and not image.getexif()
+    mine = client.get("/hr/v1/me/employee/photo", headers=auth(me))
+    assert mine.status_code == 200 and mine.content == stored
+    assert mine.headers["cache-control"] == "private, no-store"
+    assert (
+        client.get(
+            f"/hr/v1/employees/{emp['employeeId']}/photo", headers=auth(HR_READER)
+        ).status_code
+        == 200
+    )
+    assert (
+        client.get(f"/hr/v1/employees/{emp['employeeId']}/photo", headers=auth(NOBODY)).status_code
+        == 403
+    )
+    assert audit_rows(migrated_engine, emp["employeeId"])[-1][0] == "PHOTO_CHANGED"
+
+
+def test_photo_is_optional_and_missing_photo_is_a_clean_404(make_client, migrated_engine):
+    client, _ = make_client()
+    emp, me = _linked_employee(client, migrated_engine)
+    assert emp["hasPhoto"] is False
+    assert client.get("/hr/v1/me/employee/photo", headers=auth(me)).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "name,data",
+    [
+        ("a.txt", b"hello"),
+        ("a.jpg", b""),
+        ("a.jpg", b"\xff\xd8\xff not really"),
+        ("a.pdf", b"%PDF-1.4 x"),
+    ],
+)
+def test_non_images_are_refused_without_touching_the_record(
+    make_client, migrated_engine, name, data
+):
+    storage = FakeStorage()
+    client, _ = make_client(storage=storage)
+    _, me = _linked_employee(client, migrated_engine)
+    r = client.post(
+        "/hr/v1/me/employee/photo", files={"file": (name, data, "image/jpeg")}, headers=auth(me)
+    )
+    assert r.status_code == 422 and r.json()["code"] == "HR_PHOTO_NOT_ACCEPTED"
+    assert storage.objects == {}
+    assert client.get("/hr/v1/me/employee", headers=auth(me)).json()["hasPhoto"] is False
+
+
+def test_oversize_photo_is_refused(make_client, migrated_engine):
+    client, _ = make_client()
+    _, me = _linked_employee(client, migrated_engine)
+    big = b"\xff\xd8\xff" + b"0" * (5 * 1024 * 1024 + 10)
+    r = client.post(
+        "/hr/v1/me/employee/photo", files={"file": ("a.jpg", big, "image/jpeg")}, headers=auth(me)
+    )
+    assert r.status_code == 422 and "5 MB" in r.json()["detail"]
+
+
+def test_storage_outage_or_missing_storage_is_503_and_leaves_no_photo_flag(
+    make_client, migrated_engine
+):
+    for storage in (FakeStorage(fail=True), None):
+        client, _ = make_client(storage=storage)
+        _, me = _linked_employee(client, migrated_engine)
+        r = client.post(
+            "/hr/v1/me/employee/photo",
+            files={"file": ("a.jpg", _jpeg_with_gps((50, 50)), "image/jpeg")},
+            headers=auth(me),
+        )
+        assert r.status_code == 503
+        assert client.get("/hr/v1/me/employee", headers=auth(me)).json()["hasPhoto"] is False
+
+
+def test_hr_can_set_a_photo_for_an_employee_but_a_reader_cannot(make_client):
+    storage = FakeStorage()
+    client, _ = make_client(storage=storage)
+    eid = client.post("/hr/v1/employees", json=payload(), headers=auth(HR)).json()["employee"][
+        "employeeId"
+    ]
+    jpg = _jpeg_with_gps((60, 40))
+    assert (
+        client.post(
+            f"/hr/v1/employees/{eid}/photo",
+            files={"file": ("p.jpg", jpg, "image/jpeg")},
+            headers=auth(HR_READER),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            f"/hr/v1/employees/{eid}/photo",
+            files={"file": ("p.jpg", jpg, "image/jpeg")},
+            headers=auth(HR),
+        ).status_code
+        == 200
+    )
+    assert f"employee/{eid}/photo.jpg" in storage.objects

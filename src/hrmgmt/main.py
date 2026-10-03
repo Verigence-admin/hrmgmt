@@ -14,6 +14,7 @@ from hrmgmt.db import get_engine
 from hrmgmt.errors import install_error_handlers
 from hrmgmt.provisioning import SecurityUserProvisioner
 from hrmgmt.security import SecurityTokenValidator
+from hrmgmt.storage import S3Storage
 
 logger = structlog.get_logger(__name__)
 
@@ -36,6 +37,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.validator = None
     app.state.authorizer = None
     app.state.provisioner = None
+    app.state.storage = None
     if settings.security_jwks_url and settings.security_issuer and settings.security_audience:
         app.state.validator = SecurityTokenValidator(
             jwks_url=settings.security_jwks_url,
@@ -56,6 +58,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
     else:
         logger.warning("hr_permission_checks_not_configured")
+
+    if settings.storage_configured:
+        app.state.storage = S3Storage(
+            endpoint_url=settings.storage_endpoint,
+            bucket=settings.storage_bucket,
+            access_key_id=settings.storage_access_key_id,
+            secret_access_key=settings.storage_secret_access_key,
+            region=settings.storage_region,
+        )
+    else:
+        logger.warning("hr_file_storage_not_configured")
 
     app.include_router(meta_router)
     app.include_router(employees_router)

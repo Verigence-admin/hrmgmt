@@ -36,9 +36,23 @@ class Settings:
     security_audience: str
     security_client_id: str
     security_client_secret: str
+    storage_endpoint: str
+    storage_bucket: str
+    storage_access_key_id: str
+    storage_secret_access_key: str
+    storage_region: str
     allowed_origins: tuple[str, ...]
     db_pool_size: int
     db_max_overflow: int
+
+    @property
+    def storage_configured(self) -> bool:
+        return bool(
+            self.storage_endpoint
+            and self.storage_bucket
+            and self.storage_access_key_id
+            and self.storage_secret_access_key
+        )
 
     @property
     def authz_configured(self) -> bool:
@@ -74,6 +88,11 @@ def load_settings() -> Settings:
         security_audience=os.environ.get("SECURITY_AUDIENCE", "").strip(),
         security_client_id=os.environ.get("SECURITY_CLIENT_ID", "").strip(),
         security_client_secret=os.environ.get("SECURITY_CLIENT_SECRET", ""),
+        storage_endpoint=os.environ.get("HR_STORAGE_ENDPOINT", "").strip(),
+        storage_bucket=os.environ.get("HR_STORAGE_BUCKET", "").strip(),
+        storage_access_key_id=os.environ.get("HR_STORAGE_ACCESS_KEY_ID", "").strip(),
+        storage_secret_access_key=os.environ.get("HR_STORAGE_SECRET_ACCESS_KEY", ""),
+        storage_region=os.environ.get("HR_STORAGE_REGION", "auto").strip() or "auto",
         allowed_origins=tuple(dict.fromkeys([*origins, *_CAPACITOR_ORIGINS])),
         db_pool_size=_int("HR_DB_POOL_SIZE", 5, 1, 20),
         db_max_overflow=_int("HR_DB_MAX_OVERFLOW", 5, 0, 20),

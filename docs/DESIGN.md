@@ -211,3 +211,17 @@ How it works:
 **Security side (not yet built; needs its own approval before merging to Security `dev`):** Security already has a SuperAdmin-only call that creates an ACTIVE user with a verified email and a given password, with no OTP (`POST /security/v1/platform/users`). It needs a human SuperAdmin token, so HRMgmt cannot use it. The agreed addition is a service-to-service twin, `POST /security/v1/service/users`, callable only by the HRMgmt service identity, with the same body (`firstName`, `lastName`, `email`, `mobile`, `password`) and the same response (`userId`, ...), 201 on success, 409 if the email or mobile is registered, 422 if not valid. HRMgmt is already written against this contract and tested with a fake.
 
 Data rules: PAN is not unique in the database. A missing PAN, a duplicate PAN, a missing Aadhaar and a missing mobile show as flags on the employee. The API still refuses a PAN or Aadhaar that is present but malformed, and the import (next step) loads such a value as empty with a flag.
+
+## 20. Project link is automatic; outlets come from Audit Core (3 October 2026)
+
+- **No Audit Core table is added or changed for HR.** Audit Core already records who works on which project, in which role, for which dealer and outlet, and from which date (`business_assignments`, keyed by the person's Security user id). Adding an employee table or an employee column there would touch the live audit flow, so it is not done.
+- **Auto link:** the employee record carries the person's Security user id (set when the login is created). That id is the key into Audit Core's assignments, so there is nothing for HR to tag by hand. A person's project and role are whatever Audit Core says on the day.
+- **Outlets for a PC:** for an employee, HRMgmt takes their Security user id, finds their active project assignments in Audit Core (the project id comes from there), and from those the assigned outlets with their coordinates. This is the daily scheduled pull in section 16, so check-in never waits on Audit Core. HRMgmt keeps its own dated copy (project, role, outlet, from-date, to-date), so attendance on a past date is judged against the assignment that was valid on that date.
+- A PC with no active outlet assignment cannot pass the geofence; the screen says so and HR handles it as an exception.
+
+## 21. Onboarding fields and qualifications (3 October 2026)
+
+- Added to the employee: state (standard list of the 28 states and 8 union territories), 6-digit pincode, total years of experience, emergency contact address, and an optional profile photo.
+- Qualifications are separate rows, so a person can hold a bachelor's and a master's: degree (chosen from a catalogue of common Indian bachelor's and master's degrees, plus other credentials and "Other, type the name"), percentage of marks (0 to 100) and year of passing (not in the future).
+- HR enters and corrects qualifications and experience. The employee can edit their own address, state, pincode, emergency contact (name, number, address), secondary email and photo. They can view but not edit qualifications.
+- Profile photo: JPEG, PNG or WebP up to 5 MB; it is decoded, resized to 512 px and re-saved as JPEG, which removes any hidden metadata such as GPS location. Stored in the existing bucket under `hr/` and served only through HRMgmt.

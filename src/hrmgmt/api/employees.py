@@ -1,23 +1,28 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, Query, Request
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
+from fastapi.responses import Response
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import Connection, text
 from sqlalchemy.exc import IntegrityError
 
 from hrmgmt import permissions as perm
 from hrmgmt import validators as v
 from hrmgmt.audit import record_audit
+from hrmgmt.catalog import STATES, canonical_state
 from hrmgmt.db import get_conn
-from hrmgmt.errors import conflict, not_found
+from hrmgmt.errors import ApiError, conflict, dependency_unavailable, not_found
 from hrmgmt.passwords import generate_initial_password
+from hrmgmt.photos import MAX_UPLOAD_BYTES, PhotoError, normalise_profile_photo
 from hrmgmt.principal import current_user, require_permission
 from hrmgmt.provisioning import ProvisioningError, UserProvisioner
 from hrmgmt.security import HumanPrincipal
+from hrmgmt.storage import ObjectStorage, StorageError
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/hr/v1", tags=["Employees"])
@@ -34,6 +39,40 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class QualificationIn(_Strict):
+    """One qualification: the degree (from the catalogue), marks as a percentage, year passed."""
+
+    degree_code: str = Field(min_length=2, max_length=20)
+    degree_other: str | None = Field(default=None, max_length=120)
+    percentage: Decimal = Field(ge=0, le=100, decimal_places=2)
+    year_of_passing: int = Field(ge=1950, le=2100)
+
+    @model_validator(mode="after")
+    def _other_needs_a_name(self) -> QualificationIn:
+        if self.year_of_passing > date.today().year:
+            raise ValueError("Year of passing cannot be in the future")
+        if self.degree_code == "OTHER":
+            if not v.clean_text(self.degree_other):
+                raise ValueError("Type the name of the degree")
+            self.degree_other = v.clean_text(self.degree_other)
+        else:
+            self.degree_other = None
+        return self
+
+
+def _state(x: str | None) -> str | None:
+    return canonical_state(x) if x else None
+
+
+def _pincode(x: str | None) -> str | None:
+    if not x:
+        return None
+    digits = x.strip()
+    if len(digits) != 6 or not digits.isdigit() or digits[0] == "0":
+        raise ValueError("Pincode must be 6 digits and cannot start with 0")
+    return digits
+
+
 class EmployeeCreate(_Strict):
     employee_code: str = Field(min_length=2, max_length=20, pattern=r"^[A-Za-z0-9-]+$")
     full_name: str = Field(min_length=2, max_length=120)
@@ -44,15 +83,27 @@ class EmployeeCreate(_Strict):
     qualification: str | None = Field(default=None, max_length=120)
     department: str | None = Field(default=None, max_length=60)
     address: str | None = Field(default=None, max_length=500)
+    state: str | None = Field(default=None, max_length=60)
+    pincode: str | None = Field(default=None, max_length=10)
+    total_experience_years: Decimal | None = Field(default=None, ge=0, le=60, decimal_places=1)
+    emergency_contact_name: str | None = Field(default=None, max_length=120)
+    emergency_contact_number: str | None = Field(default=None, max_length=40)
+    emergency_contact_address: str | None = Field(default=None, max_length=500)
     date_of_joining: date | None = None
     pan: str | None = None
     aadhaar: str | None = None
+    qualifications: list[QualificationIn] = Field(default_factory=list, max_length=10)
     # Default on: creating an employee also creates their Verigence login.
     create_login: bool = True
 
     _email = field_validator("personal_email")(lambda cls, x: v.clean_email(x))
     _pan = field_validator("pan")(lambda cls, x: v.clean_pan(x) if x else None)
     _aadhaar = field_validator("aadhaar")(lambda cls, x: v.clean_aadhaar(x) if x else None)
+    _state = field_validator("state")(lambda cls, x: _state(x))
+    _pincode = field_validator("pincode")(lambda cls, x: _pincode(x))
+    _emergency = field_validator("emergency_contact_number")(
+        lambda cls, x: v.clean_indian_mobile(x) if x else None
+    )
 
     @field_validator("mobile")
     @classmethod
@@ -72,10 +123,22 @@ class EmployeeUpdate(_Strict):
     department: str | None = Field(default=None, max_length=60)
     designation_code: str | None = Field(default=None, max_length=40)
     address: str | None = Field(default=None, max_length=500)
+    state: str | None = Field(default=None, max_length=60)
+    pincode: str | None = Field(default=None, max_length=10)
+    total_experience_years: Decimal | None = Field(default=None, ge=0, le=60, decimal_places=1)
+    emergency_contact_name: str | None = Field(default=None, max_length=120)
+    emergency_contact_number: str | None = Field(default=None, max_length=40)
+    emergency_contact_address: str | None = Field(default=None, max_length=500)
     date_of_joining: date | None = None
     employment_status: EmploymentStatus | None = None
     pan: str | None = None
     aadhaar: str | None = None
+
+    _state = field_validator("state")(lambda cls, x: _state(x))
+    _pincode = field_validator("pincode")(lambda cls, x: _pincode(x))
+    _emergency = field_validator("emergency_contact_number")(
+        lambda cls, x: v.clean_indian_mobile(x) if x else None
+    )
 
     @field_validator("personal_email")
     @classmethod
@@ -102,9 +165,15 @@ class SelfUpdate(_Strict):
     """The only things an employee may change about themselves."""
 
     address: str | None = Field(default=None, max_length=500)
+    state: str | None = Field(default=None, max_length=60)
+    pincode: str | None = Field(default=None, max_length=10)
     emergency_contact_name: str | None = Field(default=None, max_length=120)
     emergency_contact_number: str | None = Field(default=None, max_length=40)
+    emergency_contact_address: str | None = Field(default=None, max_length=500)
     secondary_email: str | None = None
+
+    _state = field_validator("state")(lambda cls, x: _state(x))
+    _pincode = field_validator("pincode")(lambda cls, x: _pincode(x))
 
     @field_validator("emergency_contact_number")
     @classmethod
@@ -119,7 +188,8 @@ class SelfUpdate(_Strict):
 
 _PUBLIC_COLUMNS = """
     e.employee_id, e.employee_code, e.full_name, e.date_of_birth, e.gender, e.mobile,
-    e.personal_email, e.secondary_email, e.qualification, e.department, e.designation_code,
+    e.personal_email, e.secondary_email, e.qualification, e.state, e.pincode,
+    e.total_experience_years, e.emergency_contact_address, e.photo_updated_at, e.department, e.designation_code,
     d.label AS designation, e.address, e.emergency_contact_name, e.emergency_contact_number,
     e.date_of_joining, e.employment_status, e.login_status, e.login_error_code,
     s.pan, s.aadhaar,
@@ -159,6 +229,15 @@ def _view(row: Any) -> dict[str, Any]:
         "designationCode": row["designation_code"],
         "designation": row["designation"],
         "address": row["address"],
+        "state": row["state"],
+        "pincode": row["pincode"],
+        "totalExperienceYears": (
+            float(row["total_experience_years"])
+            if row["total_experience_years"] is not None
+            else None
+        ),
+        "emergencyContactAddress": row["emergency_contact_address"],
+        "hasPhoto": row["photo_updated_at"] is not None,
         "emergencyContactName": row["emergency_contact_name"],
         "emergencyContactNumber": row["emergency_contact_number"],
         "dateOfJoining": row["date_of_joining"].isoformat() if row["date_of_joining"] else None,
@@ -277,8 +356,11 @@ def create_employee(
                     """
                     INSERT INTO hr.employee
                         (employee_code, full_name, date_of_birth, gender, mobile, personal_email,
-                         qualification, department, address, date_of_joining, created_by, updated_by)
+                         qualification, department, address, state, pincode,
+                         total_experience_years, emergency_contact_name, emergency_contact_number,
+                         emergency_contact_address, date_of_joining, created_by, updated_by)
                     VALUES (:code, :name, :dob, :gender, :mobile, :email, :qual, :dept, :addr,
+                            :state, :pincode, :exp, :ec_name, :ec_number, :ec_addr,
                             :doj, :actor, :actor)
                     RETURNING employee_id
                     """
@@ -293,6 +375,12 @@ def create_employee(
                     "qual": v.clean_text(body.qualification),
                     "dept": v.clean_text(body.department),
                     "addr": v.clean_text(body.address),
+                    "state": body.state,
+                    "pincode": body.pincode,
+                    "exp": body.total_experience_years,
+                    "ec_name": v.clean_text(body.emergency_contact_name),
+                    "ec_number": body.emergency_contact_number,
+                    "ec_addr": v.clean_text(body.emergency_contact_address),
                     "doj": body.date_of_joining,
                     "actor": user.user_id,
                 },
@@ -311,6 +399,11 @@ def create_employee(
                     "actor": user.user_id,
                 },
             )
+        for q in body.qualifications:
+            _insert_qualification(conn, employee_id, q, user.user_id)
+    except UnknownDegree as exc:
+        conn.rollback()
+        raise conflict("DEGREE_UNKNOWN", "Choose a degree from the list.") from exc
     except IntegrityError as exc:
         conn.rollback()
         text_error = str(exc.orig)
@@ -331,6 +424,7 @@ def create_employee(
             "employeeCode": body.employee_code.upper(),
             "pan": "set" if body.pan else "not provided",
             "aadhaar": "set" if body.aadhaar else "not provided",
+            "qualifications": len(body.qualifications),
         },
         request=request,
     )
@@ -345,7 +439,7 @@ def create_employee(
             provisioner=provisioner,
             request=request,
         )
-    result: dict[str, Any] = {"employee": _view(_fetch(conn, employee_id))}
+    result: dict[str, Any] = {"employee": _detail(conn, employee_id)}
     if initial_password is not None:
         # Shown once, to the HR user who created the employee, so it can be handed over.
         result["initialPassword"] = initial_password
@@ -412,7 +506,7 @@ def get_employee(
     _: HumanPrincipal = Depends(can_read),
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    return _view(_fetch(conn, _uuid(employee_id)))
+    return _detail(conn, _uuid(employee_id))
 
 
 @router.patch("/employees/{employee_id}")
@@ -523,6 +617,338 @@ def reveal_sensitive(
     return {"pan": row["pan"] if row else None, "aadhaar": row["aadhaar"] if row else None}
 
 
+class UnknownDegree(Exception):
+    pass
+
+
+def _insert_qualification(
+    conn: Connection, employee_id: str, q: QualificationIn, actor: str
+) -> str:
+    known = conn.execute(
+        text("SELECT 1 FROM hr.degree WHERE code = :c AND active"), {"c": q.degree_code}
+    ).first()
+    if known is None:
+        raise UnknownDegree(q.degree_code)
+    return str(
+        conn.execute(
+            text(
+                """
+                INSERT INTO hr.employee_qualification
+                    (employee_id, degree_code, degree_other, percentage, year_of_passing,
+                     created_by, updated_by)
+                VALUES (CAST(:e AS uuid), :d, :o, :p, :y, :a, :a)
+                RETURNING qualification_id
+                """
+            ),
+            {
+                "e": employee_id,
+                "d": q.degree_code,
+                "o": q.degree_other,
+                "p": q.percentage,
+                "y": q.year_of_passing,
+                "a": actor,
+            },
+        ).scalar_one()
+    )
+
+
+def _qualifications(conn: Connection, employee_id: str) -> list[dict[str, Any]]:
+    rows = (
+        conn.execute(
+            text(
+                """
+                SELECT q.qualification_id, q.degree_code, d.label, d.level, q.degree_other,
+                       q.percentage, q.year_of_passing
+                FROM hr.employee_qualification q JOIN hr.degree d ON d.code = q.degree_code
+                WHERE q.employee_id = CAST(:e AS uuid)
+                ORDER BY q.year_of_passing DESC, q.created_at
+                """
+            ),
+            {"e": employee_id},
+        )
+        .mappings()
+        .all()
+    )
+    return [
+        {
+            "qualificationId": str(r["qualification_id"]),
+            "degreeCode": r["degree_code"],
+            "degree": r["degree_other"] if r["degree_code"] == "OTHER" else r["label"],
+            "level": r["level"],
+            "percentage": float(r["percentage"]),
+            "yearOfPassing": r["year_of_passing"],
+        }
+        for r in rows
+    ]
+
+
+def _detail(conn: Connection, employee_id: str) -> dict[str, Any]:
+    out = _view(_fetch(conn, employee_id))
+    out["qualifications"] = _qualifications(conn, employee_id)
+    return out
+
+
+@router.get("/degrees")
+def degrees(
+    _: HumanPrincipal = Depends(current_user), conn: Connection = Depends(get_conn)
+) -> list[dict[str, str]]:
+    rows = conn.execute(
+        text("SELECT code, label, level FROM hr.degree WHERE active ORDER BY sort_order")
+    ).mappings()
+    return [{"code": r["code"], "label": r["label"], "level": r["level"]} for r in rows]
+
+
+@router.get("/states")
+def states(_: HumanPrincipal = Depends(current_user)) -> list[str]:
+    return list(STATES)
+
+
+@router.post("/employees/{employee_id}/qualifications", status_code=201)
+def add_qualification(
+    employee_id: str,
+    body: QualificationIn,
+    request: Request,
+    user: HumanPrincipal = Depends(can_manage),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    employee_id = _uuid(employee_id)
+    _fetch(conn, employee_id)
+    try:
+        qid = _insert_qualification(conn, employee_id, body, user.user_id)
+    except UnknownDegree as exc:
+        raise conflict("DEGREE_UNKNOWN", "Choose a degree from the list.") from exc
+    record_audit(
+        conn,
+        actor_user_id=user.user_id,
+        action="QUALIFICATION_ADDED",
+        entity_type="employee",
+        entity_id=employee_id,
+        changes={
+            "qualificationId": qid,
+            "degree": body.degree_code,
+            "percentage": str(body.percentage),
+            "yearOfPassing": body.year_of_passing,
+        },
+        request=request,
+    )
+    return _detail(conn, employee_id)
+
+
+@router.put("/employees/{employee_id}/qualifications/{qualification_id}")
+def replace_qualification(
+    employee_id: str,
+    qualification_id: str,
+    body: QualificationIn,
+    request: Request,
+    user: HumanPrincipal = Depends(can_manage),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    employee_id, qualification_id = _uuid(employee_id), _uuid(qualification_id)
+    if (
+        conn.execute(
+            text("SELECT 1 FROM hr.degree WHERE code = :c AND active"),
+            {"c": body.degree_code},
+        ).first()
+        is None
+    ):
+        raise conflict("DEGREE_UNKNOWN", "Choose a degree from the list.")
+    updated = conn.execute(
+        text(
+            """
+            UPDATE hr.employee_qualification
+            SET degree_code = :d, degree_other = :o, percentage = :p, year_of_passing = :y,
+                updated_at = now(), updated_by = :a
+            WHERE qualification_id = CAST(:q AS uuid) AND employee_id = CAST(:e AS uuid)
+            """
+        ),
+        {
+            "d": body.degree_code,
+            "o": body.degree_other,
+            "p": body.percentage,
+            "y": body.year_of_passing,
+            "a": user.user_id,
+            "q": qualification_id,
+            "e": employee_id,
+        },
+    ).rowcount
+    if not updated:
+        raise not_found("Qualification not found.")
+    record_audit(
+        conn,
+        actor_user_id=user.user_id,
+        action="QUALIFICATION_UPDATED",
+        entity_type="employee",
+        entity_id=employee_id,
+        changes={
+            "qualificationId": qualification_id,
+            "degree": body.degree_code,
+            "percentage": str(body.percentage),
+            "yearOfPassing": body.year_of_passing,
+        },
+        request=request,
+    )
+    return _detail(conn, employee_id)
+
+
+@router.delete("/employees/{employee_id}/qualifications/{qualification_id}")
+def delete_qualification(
+    employee_id: str,
+    qualification_id: str,
+    request: Request,
+    user: HumanPrincipal = Depends(can_manage),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    employee_id, qualification_id = _uuid(employee_id), _uuid(qualification_id)
+    removed = conn.execute(
+        text(
+            "DELETE FROM hr.employee_qualification"
+            " WHERE qualification_id = CAST(:q AS uuid) AND employee_id = CAST(:e AS uuid)"
+        ),
+        {"q": qualification_id, "e": employee_id},
+    ).rowcount
+    if not removed:
+        raise not_found("Qualification not found.")
+    record_audit(
+        conn,
+        actor_user_id=user.user_id,
+        action="QUALIFICATION_REMOVED",
+        entity_type="employee",
+        entity_id=employee_id,
+        changes={"qualificationId": qualification_id},
+        request=request,
+    )
+    return _detail(conn, employee_id)
+
+
+# ---- Profile photo (optional). Re-encoded to a small JPEG with metadata removed, kept in the
+# object store under hr/, served only through this service after the permission check. ----------
+
+
+def get_storage(request: Request) -> ObjectStorage | None:
+    return getattr(request.app.state, "storage", None)
+
+
+def _photo_key(employee_id: str) -> str:
+    return f"employee/{employee_id}/photo.jpg"
+
+
+def _save_photo(
+    conn: Connection,
+    *,
+    employee_id: str,
+    data: bytes,
+    storage: ObjectStorage | None,
+    actor: str,
+    request: Request,
+) -> dict[str, Any]:
+    if storage is None:
+        raise dependency_unavailable("Photo storage is not configured.")
+    try:
+        jpeg = normalise_profile_photo(data)
+    except PhotoError as exc:
+        raise ApiError(422, "HR_PHOTO_NOT_ACCEPTED", str(exc)) from exc
+    try:
+        storage.put(_photo_key(employee_id), jpeg, "image/jpeg")
+    except StorageError as exc:
+        raise dependency_unavailable("The photo could not be saved. Please try again.") from exc
+    conn.execute(
+        text(
+            "UPDATE hr.employee SET photo_updated_at = now(), updated_at = now(), updated_by = :a"
+            " WHERE employee_id = CAST(:id AS uuid)"
+        ),
+        {"a": actor, "id": employee_id},
+    )
+    record_audit(
+        conn,
+        actor_user_id=actor,
+        action="PHOTO_CHANGED",
+        entity_type="employee",
+        entity_id=employee_id,
+        changes={"photo": "changed"},
+        request=request,
+    )
+    return _view(_fetch(conn, employee_id))
+
+
+def _read_photo(conn: Connection, employee_id: str, storage: ObjectStorage | None) -> Response:
+    row = _fetch(conn, employee_id)
+    if row["photo_updated_at"] is None:
+        raise not_found("No photo.")
+    if storage is None:
+        raise dependency_unavailable("Photo storage is not configured.")
+    try:
+        data = storage.get(_photo_key(employee_id))
+    except StorageError as exc:
+        raise dependency_unavailable("The photo could not be loaded.") from exc
+    return Response(
+        content=data, media_type="image/jpeg", headers={"Cache-Control": "private, no-store"}
+    )
+
+
+async def _upload_bytes(file: UploadFile) -> bytes:
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    return data
+
+
+@router.post("/employees/{employee_id}/photo")
+async def set_employee_photo(
+    employee_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    user: HumanPrincipal = Depends(can_manage),
+    storage: ObjectStorage | None = Depends(get_storage),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    employee_id = _uuid(employee_id)
+    _fetch(conn, employee_id)
+    return _save_photo(
+        conn,
+        employee_id=employee_id,
+        data=await _upload_bytes(file),
+        storage=storage,
+        actor=user.user_id,
+        request=request,
+    )
+
+
+@router.get("/employees/{employee_id}/photo")
+def get_employee_photo(
+    employee_id: str,
+    _: HumanPrincipal = Depends(can_read),
+    storage: ObjectStorage | None = Depends(get_storage),
+    conn: Connection = Depends(get_conn),
+) -> Response:
+    return _read_photo(conn, _uuid(employee_id), storage)
+
+
+@router.post("/me/employee/photo")
+async def set_my_photo(
+    request: Request,
+    file: UploadFile = File(...),
+    user: HumanPrincipal = Depends(current_user),
+    storage: ObjectStorage | None = Depends(get_storage),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    employee_id = _own_employee_id(conn, user)
+    return _save_photo(
+        conn,
+        employee_id=employee_id,
+        data=await _upload_bytes(file),
+        storage=storage,
+        actor=user.user_id,
+        request=request,
+    )
+
+
+@router.get("/me/employee/photo")
+def get_my_photo(
+    user: HumanPrincipal = Depends(current_user),
+    storage: ObjectStorage | None = Depends(get_storage),
+    conn: Connection = Depends(get_conn),
+) -> Response:
+    return _read_photo(conn, _own_employee_id(conn, user), storage)
+
+
 # ---- Self service: an employee's own record, found by their Security login, never by an id
 # the client supplies. ---------------------------------------------------------------------
 
@@ -544,7 +970,7 @@ def _own_employee_id(conn: Connection, user: HumanPrincipal) -> str:
 def my_record(
     user: HumanPrincipal = Depends(current_user), conn: Connection = Depends(get_conn)
 ) -> dict[str, Any]:
-    return _view(_fetch(conn, _own_employee_id(conn, user)))
+    return _detail(conn, _own_employee_id(conn, user))
 
 
 @router.patch("/me/employee")
