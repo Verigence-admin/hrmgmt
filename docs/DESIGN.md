@@ -179,3 +179,14 @@ Each phase is deployed and checked on DEV before the next starts.
 4. **Database isolation.** Recommended: HR uses its own database (its own Neon compute and connection limit), not the shared `neondb`, so a payroll run can never slow Audit Core queries or use its connections. The code needs no change for this: it only reads `DATABASE_URL`. Until that exists, HR is capped at 10 connections and runs heavy work (payroll) outside working hours.
 5. **Web.** HR screens are a separate, lazily loaded part of the app; the audit screens do not load HR code.
 6. **Security.** HR permission checks go to Security with a 60 second reuse of an ALLOW. For about 40 people this is a handful of calls per minute.
+
+## 17. Attendance photo: live camera only (3 October 2026)
+
+- The attendance screen offers only a live camera capture. There is no "choose from gallery or files" control anywhere in the attendance flow.
+- **Mobile app (Capacitor):** the Camera plugin is called with the camera as the only source and "save to gallery" off. **Browser:** a live camera stream (`getUserMedia`) captured to an image; no file input is used. If camera permission is refused, the screen says so and the person cannot check in by photo (HR handles that as an exception).
+- **What the server adds** (it cannot prove where a file came from, so it narrows the window):
+  - Check-in starts by asking the server for a one-time capture token, valid for 2 minutes and for one photo. A photo without a valid, unused token is refused.
+  - The server stamps the photo itself with address, IST time and coordinates; the time is the server's, never the phone's.
+  - Image type, size and dimensions are validated; if the image carries a capture time that is more than the window away from now, the record is flagged for HR (flagged, not blocked, because some phones strip it).
+  - Location accuracy and age are checked together with the 500 m geofence for PCs.
+- Limit, said plainly: no web or app design can make it impossible for a determined person to feed a prepared image to the API. The above removes the normal ways of doing it and leaves a trail (token, server time, flag) for HR.
