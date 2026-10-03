@@ -190,3 +190,10 @@ Each phase is deployed and checked on DEV before the next starts.
   - Image type, size and dimensions are validated; if the image carries a capture time that is more than the window away from now, the record is flagged for HR (flagged, not blocked, because some phones strip it).
   - Location accuracy and age are checked together with the 500 m geofence for PCs.
 - Limit, said plainly: no web or app design can make it impossible for a determined person to feed a prepared image to the API. The above removes the normal ways of doing it and leaves a trail (token, server time, flag) for HR.
+
+## 18. Storage: the existing bucket (3 October 2026)
+
+- HR uses the existing S3-compatible (Cloudflare R2) bucket that Audit Core already uses. No new bucket. HR reads and writes only under its own prefix `hr/` (`hr/employee/<employee id>/documents/...`, `hr/attendance/<yyyy>/<mm>/...`, `hr/claims/...`, `hr/payslips/...`); it never touches Audit Core's prefixes, and Audit Core never touches `hr/`.
+- Nothing is public. HR files are transferred through the HRMgmt service (server to bucket), not directly from the browser, so **the bucket's CORS settings do not change** and Audit Core's upload path is not touched. Identity documents (PAN, Aadhaar, bank proof) are streamed by HRMgmt only after the permission check, and each view is written to the audit log. Receipts and payslips follow the same rule.
+- Settings: `HR_STORAGE_ENDPOINT`, `HR_STORAGE_BUCKET`, `HR_STORAGE_ACCESS_KEY_ID`, `HR_STORAGE_SECRET_ACCESS_KEY`, `HR_STORAGE_REGION`, set on the HRMgmt service (see `.env.example`).
+- Security note: a key that can read the bucket can read every prefix in it. HR holds the most sensitive files in the system, so HR should get its own access key for this bucket, separate from Audit Core's, so either key can be rotated without touching the other. Whether the provider can limit a key to the `hr/` prefix alone is to be confirmed in the provider's console; if it can, we use that.
