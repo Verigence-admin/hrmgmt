@@ -565,3 +565,13 @@ def test_a_person_with_no_hr_role_such_as_a_team_lead_cannot_read_anyones_salary
     body = {"employee_id": eid, "gross_monthly": "40000", "effective_from": "2026-02-01"}
     assert team.call("post", "/payroll/structures", lead, json=body).status_code == 403
     assert team.call("get", "/me/salary", lead).status_code == 404  # no employee record: no salary
+
+
+def test_an_employee_cannot_set_or_change_their_own_salary(team):
+    eid, user = team.employee()
+    body = {"employee_id": eid, "gross_monthly": "90000", "effective_from": "2026-02-01"}
+    assert team.call("post", "/payroll/structures", user, json=body).status_code == 403
+    r = team.w.client.patch(
+        "/hr/v1/me/employee", json={"gross_monthly": 1}, headers=team.w.headers(user)
+    )
+    assert r.status_code == 422
