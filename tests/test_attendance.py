@@ -615,83 +615,18 @@ def test_a_missing_outlet_location_is_decided_by_hr_even_when_a_team_lead_exists
     assert done.status_code == 200 and done.json()["status"] == "APPROVED"
 
 
-# ---- no GPS: an untagged person types the address ----------------------------------------------
-
-
-def send_without_location(world: World, user: str, event: str, tok: str, **form):
-    path = "/hr/v1/attendance/check-in" if event == "in" else "/hr/v1/attendance/check-out"
-    return world.client.post(
-        path,
+def test_every_employee_needs_a_location_even_with_no_project(world):
+    hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
+    _, user = world.employee(hr)  # not tagged to any project
+    tok = token(world, user)
+    r = world.client.post(
+        "/hr/v1/attendance/check-in",
         headers=world.headers(user),
-        data={"token": tok, **form},
+        data={"token": tok},
         files={"photo": ("p.jpg", jpeg(), "image/jpeg")},
     )
-
-
-def untagged(world: World):
-    hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
-    return world.employee(hr)
-
-
-def test_a_person_with_no_project_checks_in_with_a_photo_and_a_typed_address(world):
-    emp, user = untagged(world)
-    r = send_without_location(
-        world, user, "in", token(world, user), address_text="  Plot 4,  Saheed Nagar, Bhubaneswar "
-    )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["needsApproval"] == [] and "NO_GPS" in body["flags"]
-    assert body["address"] == "Plot 4, Saheed Nagar, Bhubaneswar" and body["distanceM"] is None
-    with world.engine.connect() as conn:
-        lat, addr = conn.execute(
-            text(
-                "SELECT check_in_lat, check_in_address FROM hr.attendance_day WHERE employee_id = CAST(:e AS uuid)"
-            ),
-            {"e": emp["employeeId"]},
-        ).one()
-    assert lat is None and addr == "Plot 4, Saheed Nagar, Bhubaneswar"
-    assert len(world.storage.objects) == 1  # the stamped photo is still kept
-
-
-def test_without_gps_the_address_is_required_and_the_photo_session_is_kept(world):
-    _, user = untagged(world)
-    tok = token(world, user)
-    r = send_without_location(world, user, "in", tok)
-    assert r.status_code == 422 and r.json()["code"] == "ATTENDANCE_ADDRESS_REQUIRED"
-    again = send_without_location(
-        world, user, "in", tok, address_text="Near the bus stand, Cuttack"
-    )
-    assert again.status_code == 200, again.text
-
-
-def test_a_person_with_no_project_and_a_gps_fix_is_recorded_with_the_coordinates(world):
-    emp, user = untagged(world)
-    r = send(world, user, "in", token(world, user), where=FAR)
-    assert r.status_code == 200 and r.json()["needsApproval"] == []
-    assert "NO_GPS" not in r.json()["flags"]
-
-
-def test_a_pc_with_a_tagged_location_cannot_skip_the_location(world):
-    _, user, _ = setup_pc(world)
-    r = send_without_location(
-        world, user, "in", token(world, user), address_text="Somewhere in Cuttack"
-    )
-    assert r.status_code == 422 and r.json()["code"] == "ATTENDANCE_LOCATION_REQUIRED"
-
-
-def test_a_pc_whose_outlet_has_no_location_can_capture_the_address_for_hr(world):
-    _, user, _ = setup_pc(world, with_outlet=False)
-    world.assign(user, "PC", outlet=("Unmapped Outlet", None, None))
-    tok = token(world, user)
-    first = send_without_location(world, user, "in", tok, address_text="Unmapped Motors, Puri")
-    assert first.json()["code"] == "ATTENDANCE_REASON_REQUIRED"
-    r = send_without_location(
-        world, user, "in", tok, address_text="Unmapped Motors, Puri", reason="New outlet"
-    )
-    assert r.status_code == 200 and r.json()["needsApproval"] == ["NO_OUTLET_LOCATION"]
-
-
-def test_a_half_location_is_refused(world):
-    _, user = untagged(world)
-    r = send_without_location(world, user, "in", token(world, user), latitude="20.4")
-    assert r.status_code == 422 and r.json()["code"] == "ATTENDANCE_LOCATION_INVALID"
+    assert r.status_code == 422 and not world.storage.objects
+    ok = send(
+        world, user, "in", tok, where=FAR
+    )  # with a location it works, and nothing needs approval
+    assert ok.status_code == 200 and ok.json()["needsApproval"] == []
