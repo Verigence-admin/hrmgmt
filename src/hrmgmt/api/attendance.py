@@ -22,6 +22,7 @@ from hrmgmt.audit import record_audit
 from hrmgmt.authz import Authorizer
 from hrmgmt.db import get_conn
 from hrmgmt.errors import ApiError, conflict, dependency_unavailable, not_found
+from hrmgmt.facecheck import face_present
 from hrmgmt.geo import haversine_m
 from hrmgmt.geocode import ReverseGeocoder
 from hrmgmt.principal import current_user, get_authorizer, has_permission, require_permission
@@ -283,8 +284,13 @@ def _record_event(
     taken = exif_capture_time(data)
     if taken is not None and abs(taken - to_ist(now).replace(tzinfo=None)) > _PHOTO_TIME_WINDOW:
         flags.append("PHOTO_TIME_MISMATCH")
-
+    # Only whether a face is in the picture; nobody is identified. A photo is never refused for it:
+    # it is flagged, and HR sees the flag.
     checked = time.perf_counter()
+    if face_present(image) is False:
+        flags.append("NO_FACE")
+    face_checked = time.perf_counter()
+
     address = geocoder.address(latitude, longitude) if geocoder else None
     geocoded = time.perf_counter()
     if address is None:
@@ -401,7 +407,8 @@ def _record_event(
         side=event,
         photo_kb=len(data) // 1024,
         checks_ms=round((checked - started) * 1000),
-        address_ms=round((geocoded - checked) * 1000),
+        face_ms=round((face_checked - checked) * 1000),
+        address_ms=round((geocoded - face_checked) * 1000),
         stamp_ms=round((stamped_at - geocoded) * 1000),
         store_ms=round((stored - stamped_at) * 1000),
         total_ms=round((time.perf_counter() - started) * 1000),

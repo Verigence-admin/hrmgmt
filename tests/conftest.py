@@ -28,3 +28,9 @@ def migrated_engine():
     command.upgrade(alembic_config(), "head")
     yield engine
     engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _a_face_is_present(monkeypatch):
+    """Test photos are plain colour blocks. Unless a test says otherwise, the face check finds a face."""
+    monkeypatch.setattr("hrmgmt.api.attendance.face_present", lambda image: True)

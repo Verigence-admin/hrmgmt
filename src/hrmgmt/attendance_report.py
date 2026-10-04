@@ -24,6 +24,7 @@ DELINQUENCY_LABELS = {
     "EARLY_CHECK_OUT": "Early check-out",
     "OUT_OF_FENCE": "Not in tagged location",
     "NO_OUTLET_LOCATION": "No outlet location on file",
+    "NO_FACE": "No face found in the photo",
 }
 _NO_PROJECT = {"projectCode": None, "projectName": None, "roles": [], "outlets": []}
 
@@ -230,11 +231,10 @@ def _row(
         {"code": e["kind"], "status": e["status"], "reason": e["reason"]} for e in found
     )
     flagged = {*(record["check_in_flags"] or []), *(record["check_out_flags"] or [])}
-    if "NO_OUTLET_LOCATION" in flagged and not any(
-        e["kind"] == "NO_OUTLET_LOCATION" for e in found
-    ):
-        # The outlet has no position on file: HR's to fix, nobody's to approve.
-        row.delinquencies.append({"code": "NO_OUTLET_LOCATION", "status": None, "reason": None})
+    for code in ("NO_OUTLET_LOCATION", "NO_FACE"):
+        # Not for anyone to approve: HR fixes the outlet, or looks at the photo.
+        if code in flagged and not any(e["kind"] == code for e in found):
+            row.delinquencies.append({"code": code, "status": None, "reason": None})
     if record["check_out_at"] is None and past:
         row.delinquencies.append({"code": "MISSING_CHECK_OUT", "status": None})
     if any(e["status"] == "PENDING" for e in found):
