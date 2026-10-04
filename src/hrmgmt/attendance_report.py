@@ -22,7 +22,7 @@ DELINQUENCY_LABELS = {
     "MISSING_CHECK_OUT": "Checked in, never checked out",
     "LATE_CHECK_IN": "Late check-in",
     "EARLY_CHECK_OUT": "Early check-out",
-    "OUT_OF_FENCE": "Away from the assigned outlet",
+    "OUT_OF_FENCE": "Not in tagged location",
     "NO_OUTLET_LOCATION": "No outlet location on file",
 }
 _NO_PROJECT = {"projectCode": None, "projectName": None, "roles": [], "outlets": []}

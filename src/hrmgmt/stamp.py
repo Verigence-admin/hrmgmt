@@ -60,8 +60,8 @@ def stamp_photo(
     *,
     when: datetime,
     name: str,
-    latitude: float,
-    longitude: float,
+    latitude: float | None,
+    longitude: float | None,
     address: str | None,
     event: str,
 ) -> bytes:
@@ -74,7 +74,11 @@ def stamp_photo(
     lines = [
         f"{event}  {ist:%d %b %Y  %H:%M:%S} IST",
         name,
-        f"{latitude:.6f}, {longitude:.6f}",
+        (
+            f"{latitude:.6f}, {longitude:.6f}"
+            if latitude is not None and longitude is not None
+            else "Location not captured"
+        ),
     ]
     if address:
         lines.append(address)

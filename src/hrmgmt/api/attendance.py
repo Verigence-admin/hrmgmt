@@ -128,8 +128,8 @@ def _exceptions_needed(
     event: Event,
     user_id: str,
     now: datetime,
-    lat: float,
-    lon: float,
+    lat: float | None,
+    lon: float | None,
     reason: str | None,
     employee_roles: set[str],
     assignments: list[dict[str, Any]],
@@ -150,6 +150,12 @@ def _exceptions_needed(
         if not with_position:
             kinds.append("NO_OUTLET_LOCATION")
             flags.append("NO_OUTLET_LOCATION")
+        elif lat is None or lon is None:
+            raise ApiError(
+                422,
+                "ATTENDANCE_LOCATION_REQUIRED",
+                "Your location is needed to check you against your tagged location. Switch on location and try again.",
+            )
         else:
             nearest = min(
                 with_position,
@@ -177,11 +183,12 @@ def _record_event(
     *,
     photo: UploadFile,
     token: str,
-    latitude: float,
-    longitude: float,
-    accuracy_m: float,
+    latitude: float | None,
+    longitude: float | None,
+    accuracy_m: float | None,
     position_age_s: float,
     reason: str | None,
+    address_text: str | None,
     user: HumanPrincipal,
     clock: Clock,
     storage: ObjectStorage | None,
@@ -202,20 +209,26 @@ def _record_event(
     if kind == "HOLIDAY":
         raise conflict("ATTENDANCE_NOT_A_WORKING_DAY", f"Today is a holiday ({holiday}).")
 
-    if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+    has_fix = latitude is not None and longitude is not None
+    if (latitude is None) != (longitude is None):
         raise ApiError(422, "ATTENDANCE_LOCATION_INVALID", "The location is not valid.")
-    if accuracy_m < 0 or accuracy_m > float(values["attendance.max_accuracy_m"]):
-        raise ApiError(
-            422,
-            "ATTENDANCE_LOCATION_TOO_INACCURATE",
-            f"Your location is not accurate enough ({accuracy_m:.0f} m). Move to an open area and try again.",
-        )
-    if position_age_s < 0 or position_age_s > float(values["attendance.max_position_age_s"]):
-        raise ApiError(
-            422,
-            "ATTENDANCE_LOCATION_TOO_OLD",
-            "Your location is out of date. Wait for a fresh location and try again.",
-        )
+    if has_fix:
+        assert latitude is not None and longitude is not None
+        if not -90 <= latitude <= 90 or not -180 <= longitude <= 180 or accuracy_m is None:
+            raise ApiError(422, "ATTENDANCE_LOCATION_INVALID", "The location is not valid.")
+        if accuracy_m < 0 or accuracy_m > float(values["attendance.max_accuracy_m"]):
+            raise ApiError(
+                422,
+                "ATTENDANCE_LOCATION_TOO_INACCURATE",
+                f"Your location is not accurate enough ({accuracy_m:.0f} m). Move to an open area and try again.",
+            )
+        if position_age_s < 0 or position_age_s > float(values["attendance.max_position_age_s"]):
+            raise ApiError(
+                422,
+                "ATTENDANCE_LOCATION_TOO_OLD",
+                "Your location is out of date. Wait for a fresh location and try again.",
+            )
+    typed_address = " ".join((address_text or "").split()) or None
 
     day = (
         conn.execute(
@@ -255,6 +268,12 @@ def _record_event(
         employee_roles=roles,
         assignments=assignments,
     )
+    if not has_fix and not typed_address:
+        raise ApiError(
+            422,
+            "ATTENDANCE_ADDRESS_REQUIRED",
+            "Your location is not available. Type the address you are at and send again.",
+        )
     needs_reason = [k for k in kinds if k in ("OUT_OF_FENCE", "NO_OUTLET_LOCATION")]
     if needs_reason and not (reason and reason.strip()):
         # The token is not used up: the person adds a reason and sends the same photo again.
@@ -262,7 +281,7 @@ def _record_event(
             422,
             "ATTENDANCE_REASON_REQUIRED",
             (
-                "You are not at an assigned outlet. Say why, and your Team Lead or Project Manager will review it."
+                "You are not at your tagged location. Say why, and your Team Lead or Project Manager will review it."
                 if "OUT_OF_FENCE" in needs_reason
                 else "No outlet location is on file for you. Say why, and HR will review it."
             ),
@@ -286,7 +305,15 @@ def _record_event(
     if taken is not None and abs(taken - to_ist(now).replace(tzinfo=None)) > _PHOTO_TIME_WINDOW:
         flags.append("PHOTO_TIME_MISMATCH")
 
-    address = geocoder.address(latitude, longitude) if geocoder else None
+    address = (
+        geocoder.address(latitude, longitude)
+        if geocoder and latitude is not None and longitude is not None
+        else None
+    )
+    if not has_fix:
+        flags.append("NO_GPS")
+    if address is None:
+        address = typed_address
     if address is None:
         flags.append("NO_ADDRESS")
     name_row = conn.execute(
@@ -416,11 +443,12 @@ async def check_in(
     request: Request,
     photo: UploadFile = File(...),
     token: str = Form(..., max_length=100),
-    latitude: float = Form(...),
-    longitude: float = Form(...),
-    accuracy_m: float = Form(...),
+    latitude: float | None = Form(None),
+    longitude: float | None = Form(None),
+    accuracy_m: float | None = Form(None),
     position_age_s: float = Form(0),
     reason: str | None = Form(None, max_length=500),
+    address_text: str | None = Form(None, max_length=300),
     user: HumanPrincipal = Depends(current_user),
     clock: Clock = Depends(get_clock),
     storage: ObjectStorage | None = Depends(get_storage),
@@ -437,6 +465,7 @@ async def check_in(
         accuracy_m=accuracy_m,
         position_age_s=position_age_s,
         reason=reason,
+        address_text=address_text,
         user=user,
         clock=clock,
         storage=storage,
@@ -451,11 +480,12 @@ async def check_out(
     request: Request,
     photo: UploadFile = File(...),
     token: str = Form(..., max_length=100),
-    latitude: float = Form(...),
-    longitude: float = Form(...),
-    accuracy_m: float = Form(...),
+    latitude: float | None = Form(None),
+    longitude: float | None = Form(None),
+    accuracy_m: float | None = Form(None),
     position_age_s: float = Form(0),
     reason: str | None = Form(None, max_length=500),
+    address_text: str | None = Form(None, max_length=300),
     user: HumanPrincipal = Depends(current_user),
     clock: Clock = Depends(get_clock),
     storage: ObjectStorage | None = Depends(get_storage),
@@ -472,6 +502,7 @@ async def check_out(
         accuracy_m=accuracy_m,
         position_age_s=position_age_s,
         reason=reason,
+        address_text=address_text,
         user=user,
         clock=clock,
         storage=storage,
