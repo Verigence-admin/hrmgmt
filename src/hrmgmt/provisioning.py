@@ -23,10 +23,19 @@ class CreatedLogin:
     user_id: str
 
 
+@dataclass(frozen=True)
+class FoundLogin:
+    user_id: str
+    display_name: str | None
+    status: str
+
+
 class UserProvisioner(Protocol):
     def create_user(
         self, *, first_name: str, last_name: str, email: str, mobile: str, password: str
     ) -> CreatedLogin: ...
+
+    def find_user(self, *, email: str) -> FoundLogin | None: ...
 
 
 class SecurityUserProvisioner:
@@ -87,3 +96,41 @@ class SecurityUserProvisioner:
         if status in (401, 403):
             raise ProvisioningError("NOT_PERMITTED", "HRMgmt is not allowed to create users")
         raise ProvisioningError("SECURITY_UNAVAILABLE", f"Security answered HTTP {status}")
+
+    def find_user(self, *, email: str) -> FoundLogin | None:
+        """The existing Verigence user with this email, or None. One attempt, no retries."""
+        try:
+            token = self._token_provider()
+        except Exception as exc:
+            raise ProvisioningError("SECURITY_UNAVAILABLE", "Security is not reachable") from exc
+        try:
+            response = self._client.get(
+                "/security/v1/service/users/lookup",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"email": email},
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("hr_login_lookup_failed", reason="endpoint_unavailable")
+            raise ProvisioningError("SECURITY_UNAVAILABLE", "Security is not reachable") from exc
+        if response.status_code == 404:
+            return None
+        if response.status_code in (401, 403):
+            raise ProvisioningError("NOT_PERMITTED", "HRMgmt is not allowed to look up users")
+        if response.status_code != 200:
+            logger.warning("hr_login_lookup_failed", http_status=response.status_code)
+            raise ProvisioningError(
+                "SECURITY_UNAVAILABLE", f"Security answered HTTP {response.status_code}"
+            )
+        try:
+            body = response.json()
+            user_id, status = body["userId"], body["status"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ProvisioningError(
+                "BAD_RESPONSE", "Security returned an unexpected answer"
+            ) from exc
+        if not isinstance(user_id, str) or not user_id or not isinstance(status, str):
+            raise ProvisioningError("BAD_RESPONSE", "Security returned an unexpected answer")
+        name = body.get("displayName")
+        return FoundLogin(
+            user_id=user_id, display_name=name if isinstance(name, str) else None, status=status
+        )

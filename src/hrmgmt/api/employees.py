@@ -483,6 +483,73 @@ def create_login(
     return result
 
 
+class LinkLogin(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    email: str | None = Field(default=None, max_length=320)
+
+    @field_validator("email")
+    @classmethod
+    def _email(cls, value: str | None) -> str | None:
+        return v.clean_email(value) if value else None
+
+
+@router.post("/employees/{employee_id}/link-login")
+def link_login(
+    employee_id: str,
+    body: LinkLogin,
+    request: Request,
+    user: HumanPrincipal = Depends(can_manage),
+    provisioner: UserProvisioner | None = Depends(get_provisioner),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Link an employee to a Verigence login that already exists (for example a person who had a
+    login before HR). Matches by email: the employee's own, or the one HR types."""
+    row = _fetch(conn, employee_id)
+    linked = conn.execute(
+        text("SELECT security_user_id FROM hr.employee WHERE employee_id = CAST(:id AS uuid)"),
+        {"id": employee_id},
+    ).scalar_one()
+    if linked is not None:
+        raise conflict("LOGIN_ALREADY_LINKED", "This employee is already linked to a login.")
+    if provisioner is None:
+        raise dependency_unavailable("Verigence login service is not configured.")
+    email = body.email or row["personal_email"]
+    try:
+        found = provisioner.find_user(email=email)
+    except ProvisioningError as exc:
+        raise dependency_unavailable(
+            f"The Verigence user could not be looked up ({exc.code}). Please try again."
+        ) from exc
+    if found is None:
+        raise ApiError(404, "LOGIN_NOT_FOUND", "No Verigence user has this email.")
+    if found.status != "ACTIVE":
+        raise conflict("LOGIN_NOT_ACTIVE", "That Verigence user is not active.")
+    taken = conn.execute(
+        text("SELECT 1 FROM hr.employee WHERE security_user_id = CAST(:u AS uuid)"),
+        {"u": found.user_id},
+    ).first()
+    if taken:
+        raise conflict("LOGIN_IN_USE", "That login is already linked to another employee.")
+    conn.execute(
+        text(
+            "UPDATE hr.employee SET security_user_id = CAST(:u AS uuid), login_status = 'CREATED',"
+            " login_error_code = NULL, updated_at = now(), updated_by = :a"
+            " WHERE employee_id = CAST(:id AS uuid)"
+        ),
+        {"u": found.user_id, "a": user.user_id, "id": employee_id},
+    )
+    record_audit(
+        conn,
+        actor_user_id=user.user_id,
+        action="LOGIN_LINKED",
+        entity_type="employee",
+        entity_id=employee_id,
+        changes={"securityUserId": found.user_id, "matchedBy": "email"},
+        request=request,
+    )
+    return {"employee": _view(_fetch(conn, employee_id))}
+
+
 @router.get("/employees")
 def list_employees(
     q: Annotated[str | None, Query(max_length=80)] = None,

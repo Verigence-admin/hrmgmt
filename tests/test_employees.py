@@ -53,12 +53,16 @@ class FakeProvisioner:
     def __init__(self, error: str | None = None):
         self.error = error
         self.calls: list[dict] = []
+        self.existing: dict = {}
 
     def create_user(self, **kwargs):
         self.calls.append(kwargs)
         if self.error:
             raise ProvisioningError(self.error, "x")
         return CreatedLogin(user_id=str(uuid.uuid4()))
+
+    def find_user(self, *, email):
+        return self.existing.get(email)
 
 
 def _settings() -> Settings:
@@ -813,3 +817,72 @@ def test_hr_can_set_a_photo_for_an_employee_but_a_reader_cannot(make_client):
         == 200
     )
     assert f"employee/{eid}/photo.jpg" in storage.objects
+
+
+# ---- linking an existing login ----------------------------------------------------------------
+
+
+def _link(client, employee_id, body=None, user=HR):
+    return client.post(
+        f"/hr/v1/employees/{employee_id}/link-login", json=body or {}, headers=auth(user)
+    )
+
+
+def _made(client, **over):
+    r = client.post("/hr/v1/employees", json=payload(**over), headers=auth(HR))
+    assert r.status_code == 201, r.text
+    return r.json()["employee"]
+
+
+def test_link_an_existing_login_by_the_employee_email(make_client):
+    from hrmgmt.provisioning import FoundLogin
+
+    client, prov = make_client(provisioner=None)
+    # created without a login service, so no login exists yet
+    emp = _made(client)
+    assert emp["loginStatus"] == "FAILED"
+    client.app.state.provisioner = fake = FakeProvisioner()
+    existing = str(uuid.uuid4())
+    fake.existing[emp["personalEmail"]] = FoundLogin(existing, "Link Person", "ACTIVE")
+    r = _link(client, emp["employeeId"])
+    assert r.status_code == 200 and r.json()["employee"]["loginStatus"] == "CREATED"
+    again = _link(client, emp["employeeId"])
+    assert again.status_code == 409 and again.json()["code"] == "LOGIN_ALREADY_LINKED"
+
+
+def test_link_refuses_unknown_inactive_and_already_used_logins(make_client):
+    from hrmgmt.provisioning import FoundLogin
+
+    client, prov = make_client(provisioner=None)
+    first, second = _made(client), _made(client)
+    client.app.state.provisioner = fake = FakeProvisioner()
+    missing = _link(client, first["employeeId"])
+    assert missing.status_code == 404 and missing.json()["code"] == "LOGIN_NOT_FOUND"
+    fake.existing["off@example.com"] = FoundLogin(str(uuid.uuid4()), None, "SUSPENDED")
+    inactive = _link(client, first["employeeId"], {"email": "off@example.com"})
+    assert inactive.status_code == 409 and inactive.json()["code"] == "LOGIN_NOT_ACTIVE"
+    shared = FoundLogin(str(uuid.uuid4()), "Shared", "ACTIVE")
+    fake.existing["shared@example.com"] = shared
+    assert _link(client, first["employeeId"], {"email": "shared@example.com"}).status_code == 200
+    taken = _link(client, second["employeeId"], {"email": "shared@example.com"})
+    assert taken.status_code == 409 and taken.json()["code"] == "LOGIN_IN_USE"
+
+
+def test_link_needs_the_manage_permission(make_client):
+    client, _ = make_client()
+    emp = _made(client)
+    assert _link(client, emp["employeeId"], user="nobody").status_code == 403
+
+
+def test_provisioner_lookup_maps_answers_and_never_retries():
+    prov, sent = _provisioner(200, {"userId": "u-9", "displayName": "Pat", "status": "ACTIVE"})
+    got = prov.find_user(email="pat@example.com")
+    assert got.user_id == "u-9" and got.status == "ACTIVE" and len(sent) == 1
+    assert sent[0].url.path == "/security/v1/service/users/lookup"
+    assert sent[0].url.params["email"] == "pat@example.com"
+    assert _provisioner(404)[0].find_user(email="x@example.com") is None
+    for status in (401, 403, 500):
+        p, s = _provisioner(status)
+        with pytest.raises(ProvisioningError):
+            p.find_user(email="x@example.com")
+        assert len(s) == 1

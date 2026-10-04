@@ -14,7 +14,7 @@ from sqlalchemy import text
 from hrmgmt import permissions as perm
 from hrmgmt.config import Settings
 from hrmgmt.main import create_app
-from hrmgmt.provisioning import CreatedLogin
+from hrmgmt.provisioning import CreatedLogin, FoundLogin
 from hrmgmt.storage import StorageError
 from tests.test_api import FakeAuthorizer, FakeValidator
 
@@ -42,8 +42,14 @@ class FakeStorage:
 
 
 class FakeProvisioner:
+    def __init__(self):
+        self.existing: dict[str, FoundLogin] = {}
+
     def create_user(self, **kwargs):
         return CreatedLogin(user_id=str(uuid.uuid4()))
+
+    def find_user(self, *, email):
+        return self.existing.get(email)
 
 
 class FakeGeocoder:
