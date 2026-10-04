@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import uuid
+from datetime import timedelta
 
 import pytest
 from openpyxl import load_workbook
@@ -231,3 +232,95 @@ def test_the_employee_list_names_each_persons_current_projects(world):
     people = {e["employeeCode"]: e for e in body["items"]}
     assert people[emp["employeeCode"]]["projects"] == ["Project One", "Project Two"]
     assert people[lone["employeeCode"]]["projects"] == []
+
+
+def test_project_history_folds_repeats_and_keeps_ended_projects(world, migrated_engine):
+    admin, keeper = _hr(world)
+    emp, user = _person(world, admin)
+    now = world.clock()
+    # Project One: closed by an edit and live again; Project Two: worked on, then ended.
+    world.assign(
+        user,
+        "PC",
+        outlet=OUTLET,
+        project=("P1", "Project One"),
+        valid_from=now - timedelta(days=30),
+    )
+    world.assign(
+        user,
+        "PC",
+        outlet=OUTLET,
+        project=("P2", "Project Two"),
+        tenant="tenant-b",
+        valid_from=now - timedelta(days=90),
+    )
+    with migrated_engine.begin() as conn:
+        conn.execute(
+            text("UPDATE hr.work_assignment SET valid_to = :t WHERE project_code = 'P2'"),
+            {"t": now - timedelta(days=40)},
+        )
+    body = world.client.get(
+        f"/hr/v1/employees/{emp['employeeId']}/project-history", headers=world.headers(keeper)
+    ).json()
+    assert body["linked"] is True
+    assert [(i["projectName"], i["current"], i["until"] is None) for i in body["items"]] == [
+        ("Project One", True, True),
+        ("Project Two", False, False),
+    ]
+    assert (
+        body["items"][0]["outletName"] == "Cuttack Motors"
+        and body["items"][1]["since"] < body["items"][0]["since"]
+    )
+
+
+def test_project_history_needs_employee_read_and_says_when_there_is_no_login(world):
+    admin, keeper = _hr(world)
+    emp, _ = _person(world, admin)
+    nobody = world.grant(str(uuid.uuid4()))
+    assert (
+        world.client.get(
+            f"/hr/v1/employees/{emp['employeeId']}/project-history", headers=world.headers(nobody)
+        ).status_code
+        == 403
+    )
+    with world.engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE hr.employee SET security_user_id = NULL WHERE employee_id = CAST(:e AS uuid)"
+            ),
+            {"e": emp["employeeId"]},
+        )
+    body = world.client.get(
+        f"/hr/v1/employees/{emp['employeeId']}/project-history", headers=world.headers(keeper)
+    ).json()
+    assert body == {"linked": False, "syncedAt": None, "items": []}
+
+
+def test_folding_repeated_rows_keeps_the_first_start_and_the_last_end():
+    from datetime import UTC, datetime
+
+    from hrmgmt.api.attendance_reports import collapse_project_history
+
+    now = datetime(2026, 10, 5, tzinfo=UTC)
+
+    def row(start, end):
+        return {
+            "tenant_id": "t",
+            "project_code": "P",
+            "project_name": "Project",
+            "role_code": "PC",
+            "dealer_name": "D",
+            "outlet_id": "o",
+            "outlet_name": "O",
+            "valid_from": now + timedelta(days=start),
+            "valid_to": None if end is None else now + timedelta(days=end),
+        }
+
+    [ended] = collapse_project_history([row(-30, -10), row(-10, -3)], now)
+    assert (
+        ended["current"] is False
+        and ended["since"] == now - timedelta(days=30)
+        and ended["until"] == now - timedelta(days=3)
+    )
+    [live] = collapse_project_history([row(-30, -10), row(-10, None)], now)
+    assert live["current"] is True and live["until"] is None

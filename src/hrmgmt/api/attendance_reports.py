@@ -289,3 +289,77 @@ def work_assignments(
         ],
         "employees": employees,
     }
+
+
+def collapse_project_history(rows: list[dict[str, Any]], now: Any) -> list[dict[str, Any]]:
+    """One line per project, role and outlet: the first start, and either still current or the last end.
+    Audit Core closes and re-adds a person's rows whenever their mapping is edited, so the copy repeats."""
+    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for r in rows:
+        current = r["valid_from"] <= now and (r["valid_to"] is None or r["valid_to"] > now)
+        key = (r["tenant_id"], r["role_code"], r["outlet_id"])
+        line = groups.get(key)
+        if line is None:
+            groups[key] = {
+                "projectCode": r["project_code"],
+                "projectName": r["project_name"],
+                "role": r["role_code"],
+                "dealerName": r["dealer_name"],
+                "outletName": r["outlet_name"],
+                "since": r["valid_from"],
+                "until": r["valid_to"],
+                "current": current,
+            }
+            continue
+        line["since"] = min(line["since"], r["valid_from"])
+        line["current"] = line["current"] or current
+        if r["valid_to"] is not None and (line["until"] is None or r["valid_to"] > line["until"]):
+            line["until"] = r["valid_to"]
+    lines = list(groups.values())
+    for line in lines:
+        if line["current"]:
+            line["until"] = None
+    lines.sort(key=lambda line: (not line["current"], -line["since"].timestamp()))
+    return lines
+
+
+@router.get("/employees/{employee_id}/project-history")
+def project_history(
+    employee_id: str,
+    _: HumanPrincipal = Depends(can_read_employees),
+    clock: Clock = Depends(get_clock),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Every project this person is, or has been, tagged to, with from and to dates, from the copy
+    of Audit Core's assignments. Read only. Ends are as exact as the daily refresh."""
+    from hrmgmt.api.employees import _uuid
+
+    user = wc.employee_user_id(conn, _uuid(employee_id))
+    if user is None:
+        return {"linked": False, "syncedAt": None, "items": []}
+    rows = (
+        conn.execute(
+            text(
+                "SELECT tenant_id, project_code, project_name, role_code, dealer_name, outlet_id,"
+                " outlet_name, valid_from, valid_to FROM hr.work_assignment"
+                " WHERE security_user_id = CAST(:u AS uuid)"
+            ),
+            {"u": user},
+        )
+        .mappings()
+        .all()
+    )
+    sync = wc.sync_status(conn)
+    items = collapse_project_history([dict(r) for r in rows], clock())
+    return {
+        "linked": True,
+        "syncedAt": sync["last_success_at"].isoformat() if sync.get("last_success_at") else None,
+        "items": [
+            {
+                **{k: v for k, v in line.items() if k not in ("since", "until")},
+                "since": line["since"].isoformat(),
+                "until": line["until"].isoformat() if line["until"] else None,
+            }
+            for line in items
+        ],
+    }
