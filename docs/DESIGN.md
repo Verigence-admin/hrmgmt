@@ -244,3 +244,9 @@ Data rules: PAN is not unique in the database. A missing PAN, a duplicate PAN, a
 - **Pay arithmetic.** Calendar-day proration: paid days = days in month − unpaid leave − extra loss of pay − days before joining. Decimal throughout, rounded half-up to paise; PF/ESI schemes use their own rounding setting. Reimbursements are added to the payable total, not to taxable pay.
 - **Payslips.** A person sees only their own list and PDF. HR with payroll access may open anyone's; each such view is written to the audit log. PDFs are served with `Cache-Control: private, no-store`.
 - **Not in the first release:** TDS and Form 16, bank payment files, e-mail or push notifications.
+
+## 24. Who approves payroll (4 October 2026)
+
+- **CEO only.** `hr.payroll.approve` is held only through the CEO role. Security excludes this one permission from SuperAdmin's blanket access, so SuperAdmin cannot approve a payroll run unless SuperAdmin has also been given the CEO role. Every other HR permission is allowed to SuperAdmin without assigning a role.
+- **Onboarding creates the login.** Creating an employee also creates the Verigence user (no OTP step). That user starts Pending, appears under Users → Pending Approvals, ticks "Is employee", and can sign in once SuperAdmin allows it. Someone who registered on their own is linked from the employee screen by email, which also ticks "Is employee".
+- **HR roles are granted by SuperAdmin only**, from the Users screen.
