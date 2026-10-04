@@ -25,10 +25,12 @@ HR = str(uuid.uuid4())
 HR_READER = str(uuid.uuid4())
 HR_FULL = str(uuid.uuid4())
 NOBODY = str(uuid.uuid4())
+SUPPORT = str(uuid.uuid4())
 
 GRANTS = {
     HR: {perm.HR_EMPLOYEE_READ, perm.HR_EMPLOYEE_MANAGE},
     HR_READER: {perm.HR_EMPLOYEE_READ},
+    SUPPORT: {perm.HR_SUPPORT_MANAGE},
     HR_FULL: {
         perm.HR_EMPLOYEE_READ,
         perm.HR_EMPLOYEE_MANAGE,
@@ -1154,3 +1156,133 @@ def test_the_department_list_is_served(make_client):
     client, _ = make_client()
     r = client.get("/hr/v1/departments", headers=auth("anyone"))
     assert r.json() == ["Finance", "CRM", "HR", "Audit", "IT"]
+
+
+# ---- feedback and support tickets ---------------------------------------------------------
+
+
+def _raise(client, me, summary="Leave page is blank", issue="It stays white", **extra):
+    return client.post(
+        "/hr/v1/me/tickets", data={"summary": summary, "issue": issue}, headers=auth(me), **extra
+    )
+
+
+def test_an_employee_raises_a_ticket_with_files_and_support_reads_it(make_client, migrated_engine):
+    storage = FakeStorage()
+    client, _ = make_client(storage=storage)
+    emp, me = _linked_employee(client, migrated_engine)
+    r = _raise(
+        client,
+        me,
+        issue="  It stays white  ",
+        files=[
+            ("files", ("shot.html", b"<script>alert(1)</script>", "text/html")),
+            ("files", ("log.txt", b"hello", "text/plain")),
+        ],
+    )
+    assert r.status_code == 201 and r.json()["ticketNo"] >= 1
+    tid = r.json()["ticketId"]
+    listed = client.get("/hr/v1/tickets", headers=auth(SUPPORT)).json()
+    row = next(i for i in listed["items"] if i["ticketId"] == tid)
+    assert row["employeeName"] == emp["fullName"] and row["employeeEmail"] == emp["personalEmail"]
+    assert row["summary"] == "Leave page is blank" and row["status"] == "OPEN"
+    assert row["fileCount"] == 2 and row["adminNote"] is None
+    assert listed["total"] >= 1 and listed["open"] >= 1
+    detail = client.get(f"/hr/v1/tickets/{tid}", headers=auth(SUPPORT)).json()
+    assert detail["isSupport"] is True
+    assert [m["body"] for m in detail["messages"]] == ["It stays white"]
+    html = next(f for f in detail["messages"][0]["files"] if f["fileName"] == "shot.html")
+    got = client.get(f"/hr/v1/tickets/{tid}/files/{html['fileId']}", headers=auth(SUPPORT))
+    assert got.status_code == 200 and got.content == b"<script>alert(1)</script>"
+    assert got.headers["content-type"] == "application/octet-stream"
+    assert got.headers["content-disposition"].startswith("attachment")
+    assert got.headers["x-content-type-options"] == "nosniff"
+    mine = client.get(f"/hr/v1/tickets/{tid}/files/{html['fileId']}", headers=auth(me))
+    assert mine.status_code == 200
+
+
+def test_the_conversation_goes_both_ways_and_a_reply_reopens_a_closed_ticket(
+    make_client, migrated_engine
+):
+    client, _ = make_client()
+    _, me = _linked_employee(client, migrated_engine)
+    tid = _raise(client, me).json()["ticketId"]
+    sent = client.post(
+        f"/hr/v1/tickets/{tid}/messages", data={"body": "Looking at it"}, headers=auth(SUPPORT)
+    )
+    assert sent.status_code == 201 and sent.json()["status"] == "IN_PROGRESS"
+    back = client.post(
+        f"/hr/v1/tickets/{tid}/messages",
+        data={"body": "Thanks, still blank on my phone"},
+        files=[("files", ("s.png", b"png", "image/png"))],
+        headers=auth(me),
+    )
+    assert back.status_code == 201
+    done = client.patch(
+        f"/hr/v1/tickets/{tid}",
+        json={"status": "CLOSED", "adminNote": "  Fixed in 1.4  "},
+        headers=auth(SUPPORT),
+    )
+    assert done.status_code == 200 and done.json()["adminNote"] == "Fixed in 1.4"
+    again = client.post(
+        f"/hr/v1/tickets/{tid}/messages", data={"body": "It is back"}, headers=auth(me)
+    )
+    assert again.json()["status"] == "OPEN"
+    mine = client.get(f"/hr/v1/tickets/{tid}", headers=auth(me)).json()
+    assert mine["isSupport"] is False and mine["adminNote"] == "Fixed in 1.4"
+    assert [(m["authorKind"], m["body"]) for m in mine["messages"]] == [
+        ("EMPLOYEE", "It stays white"),
+        ("SUPPORT", "Looking at it"),
+        ("EMPLOYEE", "Thanks, still blank on my phone"),
+        ("EMPLOYEE", "It is back"),
+    ]
+    assert len(client.get("/hr/v1/me/tickets", headers=auth(me)).json()["items"]) == 1
+
+
+def test_a_file_over_ten_megabytes_is_refused_and_ten_is_accepted(make_client, migrated_engine):
+    storage = FakeStorage()
+    client, _ = make_client(storage=storage)
+    _, me = _linked_employee(client, migrated_engine)
+    big = b"x" * (10 * 1024 * 1024 + 1)
+    r = _raise(client, me, files=[("files", ("big.bin", big, "application/octet-stream"))])
+    assert r.status_code == 413 and r.json()["code"] == "TICKET_FILE_TOO_LARGE"
+    assert not storage.objects
+    ok = _raise(client, me, files=[("files", ("ok.bin", big[:-1], "application/octet-stream"))])
+    assert ok.status_code == 201 and len(storage.objects) == 1
+    many = _raise(client, me, files=[("files", (f"{n}.txt", b"a", "text/plain")) for n in range(6)])
+    assert many.status_code == 422
+
+
+def test_only_the_owner_and_support_see_a_ticket(make_client, migrated_engine):
+    client, _ = make_client()
+    _, me = _linked_employee(client, migrated_engine)
+    _, other = _linked_employee(client, migrated_engine)
+    tid = _raise(client, me).json()["ticketId"]
+    assert client.get(f"/hr/v1/tickets/{tid}", headers=auth(other)).status_code == 404
+    assert (
+        client.post(
+            f"/hr/v1/tickets/{tid}/messages", data={"body": "hi"}, headers=auth(other)
+        ).status_code
+        == 404
+    )
+    # HR staff are not support: the tickets go to SuperAdmin only
+    for who in (HR, HR_READER, me):
+        assert client.get("/hr/v1/tickets", headers=auth(who)).status_code == 403
+        assert (
+            client.patch(
+                f"/hr/v1/tickets/{tid}", json={"status": "CLOSED"}, headers=auth(who)
+            ).status_code
+            == 403
+        )
+    assert client.get(f"/hr/v1/tickets/{tid}", headers=auth(HR)).status_code == 404
+    assert client.get("/hr/v1/me/tickets", headers=auth(NOBODY)).status_code == 404
+
+
+def test_summary_and_issue_are_required_and_a_flood_is_stopped(make_client, migrated_engine):
+    client, _ = make_client()
+    _, me = _linked_employee(client, migrated_engine)
+    assert _raise(client, me, summary="  ").json()["code"] == "TICKET_SUMMARY_REQUIRED"
+    assert _raise(client, me, issue="  ").json()["code"] == "TICKET_ISSUE_REQUIRED"
+    for _ in range(10):
+        assert _raise(client, me).status_code == 201
+    assert _raise(client, me).json()["code"] == "TICKET_LIMIT"
