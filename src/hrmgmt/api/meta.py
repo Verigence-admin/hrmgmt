@@ -9,6 +9,7 @@ from sqlalchemy import Connection, text
 
 from hrmgmt import permissions as perm
 from hrmgmt.authz import Authorizer
+from hrmgmt.catalog import DEPARTMENTS
 from hrmgmt.db import get_conn
 from hrmgmt.principal import current_user, get_authorizer, has_permission, require_permission
 from hrmgmt.security import HumanPrincipal
@@ -53,6 +54,11 @@ def _own_employee_id_or_none(conn: Connection, user_id: str) -> str | None:
         {"u": key},
     ).first()
     return str(row[0]) if row else None
+
+
+@router.get("/departments")
+def departments(_: HumanPrincipal = Depends(current_user)) -> list[str]:
+    return list(DEPARTMENTS)
 
 
 @router.get("/designations")

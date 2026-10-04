@@ -339,12 +339,12 @@ def test_hr_update_records_old_and_new_but_never_protected_values(make_client, m
     eid = emp["employeeId"]
     r = client.patch(
         f"/hr/v1/employees/{eid}",
-        json={"designation_code": "SENIOR_ANALYST", "department": "  RM ", "pan": "ZZZZZ9999Z"},
+        json={"designation_code": "SENIOR_ANALYST", "department": "  hr ", "pan": "ZZZZZ9999Z"},
         headers=auth(HR),
     )
     assert r.status_code == 200
     got = r.json()
-    assert got["designation"] == "Senior Analyst" and got["department"] == "RM"
+    assert got["designation"] == "Senior Analyst" and got["department"] == "HR"
     assert got["panMasked"] == "XXXXX9999Z"
     last = audit_rows(migrated_engine, eid)[-1]
     changes = json.loads(last[1])
@@ -1128,3 +1128,29 @@ def test_bad_experience_is_refused(make_client, migrated_engine, over):
     _, me = _linked_employee(client, migrated_engine)
     r = client.post("/hr/v1/me/employee/experiences", json=_job(**over), headers=auth(me))
     assert r.status_code == 422
+
+
+@pytest.mark.parametrize("given", ["Finance", "crm", " HR ", "AUDIT", "it"])
+def test_department_is_one_of_the_five_and_spelt_the_standard_way(make_client, given):
+    client, _ = make_client()
+    r = client.post("/hr/v1/employees", json=payload(department=given), headers=auth(HR))
+    assert r.status_code == 201
+    assert r.json()["employee"]["department"] in ("Finance", "CRM", "HR", "Audit", "IT")
+
+
+@pytest.mark.parametrize("given", ["PC", "Sales", "Human Resources"])
+def test_any_other_department_is_refused(make_client, given):
+    client, _ = make_client()
+    r = client.post("/hr/v1/employees", json=payload(department=given), headers=auth(HR))
+    assert r.status_code == 422 and r.json()["code"] == "HR_VALIDATION_FAILED"
+    emp = client.post("/hr/v1/employees", json=payload(), headers=auth(HR)).json()["employee"]
+    r = client.patch(
+        f"/hr/v1/employees/{emp['employeeId']}", json={"department": given}, headers=auth(HR)
+    )
+    assert r.status_code == 422
+
+
+def test_the_department_list_is_served(make_client):
+    client, _ = make_client()
+    r = client.get("/hr/v1/departments", headers=auth("anyone"))
+    assert r.json() == ["Finance", "CRM", "HR", "Audit", "IT"]

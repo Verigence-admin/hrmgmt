@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from hrmgmt import permissions as perm
 from hrmgmt import validators as v
 from hrmgmt.audit import record_audit
-from hrmgmt.catalog import STATES, canonical_state
+from hrmgmt.catalog import STATES, canonical_department, canonical_state
 from hrmgmt.db import get_conn
 from hrmgmt.errors import ApiError, conflict, dependency_unavailable, not_found
 from hrmgmt.passwords import generate_initial_password
@@ -101,6 +101,10 @@ def _state(x: str | None) -> str | None:
     return canonical_state(x) if x else None
 
 
+def _department(x: str | None) -> str | None:
+    return canonical_department(x) if x and x.strip() else None
+
+
 def _pincode(x: str | None) -> str | None:
     if not x:
         return None
@@ -138,6 +142,7 @@ class EmployeeCreate(_Strict):
     _pan = field_validator("pan")(lambda cls, x: v.clean_pan(x) if x else None)
     _aadhaar = field_validator("aadhaar")(lambda cls, x: v.clean_aadhaar(x) if x else None)
     _state = field_validator("state")(lambda cls, x: _state(x))
+    _department = field_validator("department")(lambda cls, x: _department(x))
     _pincode = field_validator("pincode")(lambda cls, x: _pincode(x))
     _emergency = field_validator("emergency_contact_number")(
         lambda cls, x: v.clean_indian_mobile(x) if x else None
@@ -174,6 +179,7 @@ class EmployeeUpdate(_Strict):
     aadhaar: str | None = None
 
     _state = field_validator("state")(lambda cls, x: _state(x))
+    _department = field_validator("department")(lambda cls, x: _department(x))
     _pincode = field_validator("pincode")(lambda cls, x: _pincode(x))
     _emergency = field_validator("emergency_contact_number")(
         lambda cls, x: v.clean_indian_mobile(x) if x else None
@@ -246,6 +252,9 @@ _PUBLIC_COLUMNS = """
                      AND x.status = 'APPROVED'
                      AND x.effective_from <= (now() AT TIME ZONE 'Asia/Kolkata')::date)
             THEN 'APPROVED'
+        WHEN EXISTS (SELECT 1 FROM hr.salary_structure x WHERE x.employee_id = e.employee_id
+                     AND x.status = 'PROPOSED' AND x.components = '[]'::jsonb)
+            THEN 'TEMPLATE_PENDING'
         WHEN EXISTS (SELECT 1 FROM hr.salary_structure x WHERE x.employee_id = e.employee_id
                      AND x.status = 'PROPOSED') THEN 'WAITING_FINANCE'
         WHEN EXISTS (SELECT 1 FROM hr.salary_structure x WHERE x.employee_id = e.employee_id

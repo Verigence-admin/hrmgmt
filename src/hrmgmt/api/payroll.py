@@ -38,9 +38,17 @@ can_propose = require_permission(perm.HR_SALARY_PROPOSE)
 can_decide_salary = require_permission(perm.HR_SALARY_APPROVE)
 can_settings = require_permission(perm.HR_SETTINGS_MANAGE)
 
-# A salary between these (inclusive) has no template yet: HR must choose one on purpose.
+# Three default categories by monthly gross: up to 21,000 (BELOW_21K), 21,001 to 24,999
+# (MID_21K_25K, created by HR when ready) and 25,000 and above (ABOVE_25K). Until the middle
+# template exists, a gross in that range has none: HR chooses one on purpose, or, in the bulk
+# import, the salary waits as "template pending" and fills itself when the template is created.
 BAND_LOW = Decimal("21001")
-BAND_HIGH = Decimal("25000")
+BAND_HIGH = Decimal("25000")  # exclusive: 25,000 itself belongs to ABOVE_25K
+MID_TEMPLATE_CODE = "MID_21K_25K"
+
+
+def in_mid_band(gross: Decimal) -> bool:
+    return BAND_LOW <= gross < BAND_HIGH
 
 
 def _month(value: str) -> date:
@@ -79,7 +87,7 @@ def templates(
     rows = conn.execute(text("SELECT * FROM hr.salary_template ORDER BY code")).mappings()
     return {
         "items": [_template_view(r) for r in rows],
-        "bandNote": "A gross between ₹21,001 and ₹25,000 has no template yet. HR chooses one on purpose.",
+        "bandNote": "A gross between ₹21,001 and ₹24,999 uses the MID_21K_25K template once HR creates it; until then HR chooses one on purpose.",
     }
 
 
@@ -144,7 +152,7 @@ def update_template(
         changes={"name": body.name},
         request=request,
     )
-    return _template_view(
+    updated = (
         conn.execute(
             text("SELECT * FROM hr.salary_template WHERE template_id = CAST(:t AS uuid)"),
             {"t": tid},
@@ -152,6 +160,8 @@ def update_template(
         .mappings()
         .one()
     )
+    fill_pending_structures(conn, updated)
+    return _template_view(updated)
 
 
 @router.post("/payroll/templates", status_code=201)
@@ -189,7 +199,7 @@ def create_template(
         changes={"code": code},
         request=request,
     )
-    return _template_view(
+    created = (
         conn.execute(
             text("SELECT * FROM hr.salary_template WHERE template_id = CAST(:t AS uuid)"),
             {"t": tid},
@@ -197,6 +207,8 @@ def create_template(
         .mappings()
         .one()
     )
+    fill_pending_structures(conn, created)
+    return _template_view(created)
 
 
 # ---- salary structures ---------------------------------------------------------------------
@@ -215,6 +227,7 @@ def _structure_view(r: Any) -> dict[str, Any]:
         "proposedAt": r["proposed_at"].isoformat(),
         "decidedAt": r["decided_at"].isoformat() if r["decided_at"] else None,
         "decisionNote": r["decision_note"],
+        "templatePending": not r["components"],
     }
 
 
@@ -228,6 +241,53 @@ class StructureIn(BaseModel):
     note: str | None = Field(default=None, max_length=300)
 
 
+_BAND_MESSAGE = (
+    "A gross between ₹21,001 and ₹24,999 has no template yet. "
+    "Choose a template yourself and confirm it."
+)
+
+
+def _active_template(conn: Connection, code: str) -> Any:
+    return (
+        conn.execute(
+            text("SELECT * FROM hr.salary_template WHERE code = :c AND active"), {"c": code}
+        )
+        .mappings()
+        .first()
+    )
+
+
+def fill_pending_structures(conn: Connection, template: Any) -> int:
+    """When the middle template becomes available, give it to every proposal waiting for one."""
+    if template["code"] != MID_TEMPLATE_CODE or not template["active"]:
+        return 0
+    filled = 0
+    rows = conn.execute(
+        text(
+            "SELECT structure_id, gross_monthly FROM hr.salary_structure"
+            " WHERE status = 'PROPOSED' AND components = '[]'::jsonb AND template_id IS NULL"
+            " AND gross_monthly >= :low AND gross_monthly < :high FOR UPDATE"
+        ),
+        {"low": BAND_LOW, "high": BAND_HIGH},
+    ).mappings()
+    for r in list(rows):
+        try:
+            components = pcalc.resolve_components(
+                list(template["components"]), Decimal(r["gross_monthly"])
+            )
+        except pcalc.PayrollError:
+            continue  # this gross does not fit the template; it stays pending, visibly
+        conn.execute(
+            text(
+                "UPDATE hr.salary_structure SET template_id = :t, components = CAST(:c AS jsonb)"
+                " WHERE structure_id = :s"
+            ),
+            {"t": template["template_id"], "c": json.dumps(components), "s": r["structure_id"]},
+        )
+        filled += 1
+    return filled
+
+
 @router.post("/payroll/structures", status_code=201)
 def propose_structure(
     body: StructureIn,
@@ -239,7 +299,12 @@ def propose_structure(
 
 
 def create_structure(
-    conn: Connection, body: StructureIn, user: HumanPrincipal, request: Request
+    conn: Connection,
+    body: StructureIn,
+    user: HumanPrincipal,
+    request: Request,
+    *,
+    template_pending_ok: bool = False,
 ) -> dict[str, Any]:
     """Proposes a salary structure. Shared by the single proposal and the bulk import, so both
     apply the same template and band rules."""
@@ -266,30 +331,29 @@ def create_structure(
         )
         if template is None:
             raise ApiError(422, "TEMPLATE_UNKNOWN", "Choose one of the listed templates.")
-    if BAND_LOW <= gross <= BAND_HIGH:
-        if template is None or not body.band_confirmed:
-            raise ApiError(
-                422,
-                "SALARY_BAND_NEEDS_CHOICE",
-                "A gross between ₹21,001 and ₹25,000 has no template yet. Choose a template yourself and confirm it.",
-            )
+    components: list[dict[str, Any]] = []
+    if in_mid_band(gross):
+        mid = _active_template(conn, MID_TEMPLATE_CODE)
+        if template is None and mid is not None:
+            template = mid
+        elif template is not None and template["code"] != MID_TEMPLATE_CODE:
+            if not body.band_confirmed:
+                raise ApiError(422, "SALARY_BAND_NEEDS_CHOICE", _BAND_MESSAGE)
+        elif template is None:
+            if not template_pending_ok:
+                raise ApiError(422, "SALARY_BAND_NEEDS_CHOICE", _BAND_MESSAGE)
     elif template is None:
         code = "BELOW_21K" if gross < BAND_LOW else "ABOVE_25K"
-        template = (
-            conn.execute(
-                text("SELECT * FROM hr.salary_template WHERE code = :c AND active"), {"c": code}
-            )
-            .mappings()
-            .first()
-        )
+        template = _active_template(conn, code)
         if template is None:
             raise ApiError(
                 422, "TEMPLATE_UNKNOWN", "The default template is not available. Choose one."
             )
-    try:
-        components = pcalc.resolve_components(list(template["components"]), gross)
-    except pcalc.PayrollError as exc:
-        raise ApiError(422, "TEMPLATE_INVALID", str(exc)) from exc
+    if template is not None:
+        try:
+            components = pcalc.resolve_components(list(template["components"]), gross)
+        except pcalc.PayrollError as exc:
+            raise ApiError(422, "TEMPLATE_INVALID", str(exc)) from exc
     sid = str(
         conn.execute(
             text(
@@ -298,7 +362,7 @@ def create_structure(
             ),
             {
                 "e": eid,
-                "t": template["template_id"],
+                "t": template["template_id"] if template else None,
                 "g": gross,
                 "c": json.dumps(components),
                 "d": body.effective_from,
@@ -316,7 +380,7 @@ def create_structure(
         changes={
             "structureId": sid,
             "effectiveFrom": body.effective_from.isoformat(),
-            "template": template["code"],
+            "template": template["code"] if template else None,
         },
         request=request,
     )
@@ -407,6 +471,12 @@ def decide_structure(
         raise forbidden("You cannot approve your own proposal or your own salary.")
     if body.decision == "REJECT" and not (body.note and body.note.strip()):
         raise ApiError(422, "APPROVAL_NOTE_REQUIRED", "Say why you are rejecting it.")
+    if body.decision == "APPROVE" and not row["components"]:
+        raise conflict(
+            "SALARY_TEMPLATE_PENDING",
+            "This salary has no template yet, so it cannot be approved. "
+            "It fills in when the ₹21,001 to ₹24,999 template is created.",
+        )
     status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
     if status == "APPROVED":
         conn.execute(

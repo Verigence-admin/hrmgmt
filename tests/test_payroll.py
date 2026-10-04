@@ -129,7 +129,7 @@ def test_default_template_is_picked_by_gross_and_parts_add_up(team):
     assert [c["code"] for c in high["components"]] == ["BASIC", "HRA", "SPECIAL"]
 
 
-def test_the_21k_to_25k_band_needs_a_chosen_and_confirmed_template(team):
+def test_the_21k_to_24999_band_needs_a_chosen_and_confirmed_template_until_its_own_exists(team):
     eid, _ = team.employee()
     body = {"employee_id": eid, "gross_monthly": "22000", "effective_from": "2026-01-01"}
     r = team.call("post", "/payroll/structures", team.hr, json=body)
@@ -146,7 +146,13 @@ def test_the_21k_to_25k_band_needs_a_chosen_and_confirmed_template(team):
     )
     assert r.status_code == 201
     # the edges of the band are inside it, the values just outside are not
-    for gross, code in (("21001", 422), ("25000", 422), ("21000", 201), ("25001", 201)):
+    for gross, code in (
+        ("21001", 422),
+        ("24999.99", 422),
+        ("25000", 201),
+        ("21000.99", 201),
+        ("25001", 201),
+    ):
         r = team.call("post", "/payroll/structures", team.hr, json={**body, "gross_monthly": gross})
         assert r.status_code == code, gross
 

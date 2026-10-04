@@ -49,3 +49,15 @@ def canonical_state(value: str) -> str:
     if key in _BY_LOWER:
         return _BY_LOWER[key]
     raise ValueError("Choose a state or union territory from the list")
+
+
+DEPARTMENTS = ("Finance", "CRM", "HR", "Audit", "IT")
+_DEPARTMENT_BY_LOWER = {name.lower(): name for name in DEPARTMENTS}
+
+
+def canonical_department(value: str) -> str:
+    """Return the standard spelling of one of the company's departments, or raise."""
+    key = " ".join(value.split()).lower()
+    if key in _DEPARTMENT_BY_LOWER:
+        return _DEPARTMENT_BY_LOWER[key]
+    raise ValueError("Choose Finance, CRM, HR, Audit or IT")

@@ -298,3 +298,9 @@ joining, else today), through the same code as a hand-entered proposal, so Finan
 A gross from 21,001 to 25,000 has no template and is left for HR to add on the employee's page. Rows
 that already have a matching proposed or approved salary, or the same designation, change nothing, so
 the sheet can be run again. Salary amounts never go in the audit log.
+
+## 30. Departments
+
+Department is one of Finance, CRM, HR, Audit or IT (`GET /hr/v1/departments`). It is checked on
+create, update and import (spelling is normalised; anything else is refused, or noted and left empty
+in a spreadsheet). Records that already hold some other text keep it until HR picks one.

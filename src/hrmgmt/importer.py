@@ -18,7 +18,7 @@ from typing import Any
 from openpyxl import load_workbook
 
 from hrmgmt import validators as v
-from hrmgmt.catalog import canonical_state
+from hrmgmt.catalog import canonical_department, canonical_state
 
 MAX_IMPORT_BYTES = 2 * 1024 * 1024
 MAX_SHEET_ROWS = 1000  # rows read; an empty-but-formatted sheet can claim far more
@@ -287,7 +287,15 @@ def parse_employee_sheet(data: bytes) -> list[ParsedRow]:
         if gender_raw and values["gender"] is None:
             row.notes.append("Gender is not recognised; left empty.")
 
-        for key, limit in (("qualification", 120), ("department", 60), ("address", 500)):
+        department = _text(record.get("department"))
+        values["department"] = None
+        if department:
+            try:
+                values["department"] = canonical_department(department)
+            except ValueError:
+                row.notes.append("Department is not Finance, CRM, HR, Audit or IT; left empty.")
+
+        for key, limit in (("qualification", 120), ("address", 500)):
             text = _text(record.get(key))
             values[key] = text[:limit] if text else None
             if len(text) > limit:

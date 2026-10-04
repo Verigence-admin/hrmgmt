@@ -2,8 +2,9 @@
 Salary (Monthly), Date of Joining). Preview first, nothing saved; then commit in batches.
 
 A salary is only ever proposed here, exactly as one entered by hand: Finance still approves it.
-A gross in the band that has no template (21,001 to 25,000) is not guessed; it is left for HR to
-add on the employee's page, where the template is chosen on purpose."""
+A gross from 21,001 to 24,999 belongs to the middle template, which HR creates when ready. Until
+then that salary is still saved, as "template pending": it cannot be approved, and it fills itself
+in when the template is created."""
 
 from __future__ import annotations
 
@@ -23,7 +24,13 @@ from sqlalchemy import Connection, text
 
 from hrmgmt import permissions as perm
 from hrmgmt.api.employees import _uuid
-from hrmgmt.api.payroll import BAND_HIGH, BAND_LOW, StructureIn, create_structure
+from hrmgmt.api.payroll import (
+    MID_TEMPLATE_CODE,
+    StructureIn,
+    _active_template,
+    create_structure,
+    in_mid_band,
+)
 from hrmgmt.audit import record_audit
 from hrmgmt.db import get_conn
 from hrmgmt.errors import ApiError
@@ -138,6 +145,7 @@ def _plan(conn: Connection, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {"codes": codes},
         ).mappings()
     }
+    mid_missing = _active_template(conn, MID_TEMPLATE_CODE) is None
     plans: list[dict[str, Any]] = []
     seen: set[str] = set()
     for r, code in zip(rows, codes, strict=True):
@@ -149,6 +157,7 @@ def _plan(conn: Connection, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "setDesignation": None,
             "salary": None,
             "salaryAction": None,
+            "templatePending": False,
         }
         person = people.get(code)
         if not code or person is None:
@@ -177,23 +186,23 @@ def _plan(conn: Connection, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if joined and person["date_of_joining"] and joined != person["date_of_joining"]:
             plan["notes"].append("Date of joining differs from the record; the record is kept.")
         plan["salary"] = amount
-        if BAND_LOW <= amount <= BAND_HIGH:
-            plan["salaryAction"] = "NEEDS_TEMPLATE"
+        plan["templatePending"] = in_mid_band(amount) and mid_missing
+        existing = conn.execute(
+            text(
+                "SELECT status, gross_monthly FROM hr.salary_structure"
+                " WHERE employee_id = CAST(:e AS uuid)"
+                " AND (status = 'PROPOSED' OR (status = 'APPROVED' AND gross_monthly = :g))"
+            ),
+            {"e": plan["employeeId"], "g": amount},
+        ).first()
+        plan["salaryAction"] = "EXISTS" if existing else "PROPOSE"
+        if existing:
+            plan["notes"].append("A matching salary is already proposed or approved.")
+        elif plan["templatePending"]:
             plan["notes"].append(
-                "This gross has no template; add the salary on the employee's page and choose one."
+                "Saved as template pending; it fills in when the ₹21,001 to ₹24,999 template "
+                "is created."
             )
-        else:
-            existing = conn.execute(
-                text(
-                    "SELECT status, gross_monthly FROM hr.salary_structure"
-                    " WHERE employee_id = CAST(:e AS uuid)"
-                    " AND (status = 'PROPOSED' OR (status = 'APPROVED' AND gross_monthly = :g))"
-                ),
-                {"e": plan["employeeId"], "g": amount},
-            ).first()
-            plan["salaryAction"] = "EXISTS" if existing else "PROPOSE"
-            if existing:
-                plan["notes"].append("A matching salary is already proposed or approved.")
         plans.append(plan)
     return plans
 
@@ -201,8 +210,6 @@ def _plan(conn: Connection, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _public(plan: dict[str, Any], names: dict[str, str]) -> dict[str, Any]:
     changes = plan["setDesignation"] is not None or plan["salaryAction"] == "PROPOSE"
     status = "ERROR" if plan["errors"] else ("READY" if changes else "NO_CHANGE")
-    if not plan["errors"] and not changes and plan["salaryAction"] == "NEEDS_TEMPLATE":
-        status = "NEEDS_TEMPLATE"
     return {
         "row": plan["row"],
         "status": status,
@@ -210,6 +217,7 @@ def _public(plan: dict[str, Any], names: dict[str, str]) -> dict[str, Any]:
         "fullName": plan.get("fullName"),
         "designation": names.get(plan["setDesignation"] or ""),
         "salaryAction": plan["salaryAction"],
+        "templatePending": plan["templatePending"] and plan["salaryAction"] == "PROPOSE",
         "salary": float(plan["salary"]) if plan["salary"] is not None else None,
         "effectiveFrom": plan.get("effectiveFrom"),
         "notes": plan["notes"],
@@ -235,15 +243,12 @@ async def preview(
     plans = _plan(conn, _parse(await _read(file)))
     names = _names(conn)
     out = [_public(p, names) for p in plans]
-    count = {
-        s: sum(1 for o in out if o["status"] == s)
-        for s in ("READY", "NEEDS_TEMPLATE", "NO_CHANGE", "ERROR")
-    }
+    count = {s: sum(1 for o in out if o["status"] == s) for s in ("READY", "NO_CHANGE", "ERROR")}
     return {
         "summary": {
             "total": len(out),
             "ready": count["READY"],
-            "needsTemplate": count["NEEDS_TEMPLATE"],
+            "templatePending": sum(1 for o in out if o["templatePending"]),
             "noChange": count["NO_CHANGE"],
             "errors": count["ERROR"],
         },
@@ -355,6 +360,7 @@ def _apply(
             ),
             user,
             request,
+            template_pending_ok=True,
         )
         item["salary"] = "PROPOSED"
     return item

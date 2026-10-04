@@ -78,7 +78,7 @@ def good_row(n: str | None = None, **over):
         "email": f"asha.{n.lower()}@example.com",
         "qual": "B com,MBA",
         "code": f"IM{n}",
-        "dept": "PC",
+        "dept": "Audit",
         "pan": "ABCDE1234F",
         "aadhaar": 123456789012,
         "address": "12 Main Road",
@@ -381,3 +381,12 @@ def test_commit_saves_profile_and_one_qualification_when_the_degree_is_in_the_li
     assert emp["qualifications"][0]["college"] == "Ravenshaw College"
     other = client.get(f"/hr/v1/employees/{second['employeeId']}", headers=auth(HR)).json()
     assert other["qualifications"] == [] and "QUALIFICATION" in other["missingDetails"]
+
+
+def test_a_department_outside_the_five_is_noted_and_left_empty():
+    ok, odd = parse_employee_sheet(
+        sheet([good_row("D1", dept=" finance "), good_row("D2", dept="PC")])
+    )
+    assert ok.values["department"] == "Finance"
+    assert odd.values["department"] is None
+    assert any("Department is not Finance, CRM, HR, Audit or IT" in n for n in odd.notes)
