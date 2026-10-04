@@ -89,7 +89,11 @@ def test_bad_token_is_401_and_key_outage_is_503(make_client):
 def test_me_lists_only_granted_permissions(make_client):
     c = make_client({"hr1": {perm.HR_EMPLOYEE_READ, perm.HR_AUDIT_READ}})
     body = c.get("/hr/v1/me", headers=auth("hr1")).json()
-    assert body == {"userId": "hr1", "permissions": [perm.HR_EMPLOYEE_READ, perm.HR_AUDIT_READ]}
+    assert body == {
+        "userId": "hr1",
+        "permissions": [perm.HR_EMPLOYEE_READ, perm.HR_AUDIT_READ],
+        "employeeId": None,
+    }
     assert c.get("/hr/v1/me", headers=auth("nobody")).json()["permissions"] == []
 
 

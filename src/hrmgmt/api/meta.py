@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
@@ -20,11 +21,32 @@ can_read_audit = require_permission(perm.HR_AUDIT_READ)
 def me(
     user: HumanPrincipal = Depends(current_user),
     authorizer: Authorizer = Depends(get_authorizer),
+    conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    """Who the caller is and which HR powers they hold, so the UI can pick navigation.
-    The server re-checks every protected request regardless of this answer."""
+    """Who the caller is, which HR powers they hold, and whether an employee record is linked to
+    their login, so the UI can pick navigation in one call. The server re-checks every protected
+    request regardless of this answer."""
     granted = [p for p in perm.ALL_PERMISSIONS if has_permission(authorizer, user, p)]
-    return {"userId": user.user_id, "permissions": granted}
+    return {
+        "userId": user.user_id,
+        "permissions": granted,
+        "employeeId": _own_employee_id_or_none(conn, user.user_id),
+    }
+
+
+def _own_employee_id_or_none(conn: Connection, user_id: str) -> str | None:
+    try:
+        key = str(uuid.UUID(user_id))
+    except ValueError:
+        return None
+    row = conn.execute(
+        text(
+            "SELECT employee_id FROM hr.employee"
+            " WHERE security_user_id = CAST(:u AS uuid) AND employment_status = 'ACTIVE'"
+        ),
+        {"u": key},
+    ).first()
+    return str(row[0]) if row else None
 
 
 @router.get("/designations")

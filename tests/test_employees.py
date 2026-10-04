@@ -352,6 +352,14 @@ def _linked_employee(client, migrated_engine, **over):
     return emp, user_id
 
 
+def test_me_reports_the_linked_employee_record(make_client, migrated_engine):
+    client, _ = make_client()
+    emp, me = _linked_employee(client, migrated_engine)
+    body = client.get("/hr/v1/me", headers=auth(me)).json()
+    assert body["employeeId"] == emp["employeeId"]
+    assert client.get("/hr/v1/me", headers=auth(NOBODY)).json()["employeeId"] is None
+
+
 def test_employee_reads_and_edits_only_their_own_permitted_fields(make_client, migrated_engine):
     client, _ = make_client()
     emp, me = _linked_employee(client, migrated_engine)
