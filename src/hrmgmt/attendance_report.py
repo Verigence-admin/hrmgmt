@@ -84,7 +84,7 @@ def build_rows(
                 FROM hr.employee
                 WHERE employment_status = 'ACTIVE'
                   AND (CAST(:e AS uuid) IS NULL OR employee_id = CAST(:e AS uuid))
-                ORDER BY employee_code
+                ORDER BY lower(full_name), employee_code
                 """
             ),
             params,

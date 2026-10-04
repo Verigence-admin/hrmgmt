@@ -690,7 +690,7 @@ def list_employees(
         conn.execute(
             text(
                 f"SELECT {_PUBLIC_COLUMNS} {_FROM} {where}"
-                " ORDER BY e.employee_code LIMIT :limit OFFSET :offset"
+                " ORDER BY lower(e.full_name), e.employee_code LIMIT :limit OFFSET :offset"
             ),
             params,
         )

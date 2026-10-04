@@ -702,7 +702,7 @@ def _run_view(conn: Connection, row: Any, with_lines: bool = True) -> dict[str, 
     }
     if with_lines:
         lines = conn.execute(
-            text("SELECT * FROM hr.payroll_line WHERE run_id = :r ORDER BY employee_code"),
+            text("SELECT * FROM hr.payroll_line WHERE run_id = :r ORDER BY lower(employee_name), employee_code"),
             {"r": row["run_id"]},
         ).mappings()
         out["lines"] = [_line_summary(r) for r in lines]
@@ -1106,7 +1106,7 @@ def approve_run(
     lines = (
         conn.execute(
             text(
-                "SELECT l.*, s.pan FROM hr.payroll_line l LEFT JOIN hr.employee_sensitive s ON s.employee_id = l.employee_id WHERE l.run_id = CAST(:r AS uuid) ORDER BY l.employee_code"
+                "SELECT l.*, s.pan FROM hr.payroll_line l LEFT JOIN hr.employee_sensitive s ON s.employee_id = l.employee_id WHERE l.run_id = CAST(:r AS uuid) ORDER BY lower(l.employee_name), l.employee_code"
             ),
             {"r": rid},
         )
@@ -1302,7 +1302,7 @@ def run_payslips(
 ) -> dict[str, Any]:
     rows = conn.execute(
         text(
-            "SELECT p.payslip_id, p.employee_id, l.employee_code, l.employee_name FROM hr.payslip p JOIN hr.payroll_line l ON l.run_id = p.run_id AND l.employee_id = p.employee_id WHERE p.run_id = CAST(:r AS uuid) ORDER BY l.employee_code"
+            "SELECT p.payslip_id, p.employee_id, l.employee_code, l.employee_name FROM hr.payslip p JOIN hr.payroll_line l ON l.run_id = p.run_id AND l.employee_id = p.employee_id WHERE p.run_id = CAST(:r AS uuid) ORDER BY lower(l.employee_name), l.employee_code"
         ),
         {"r": _uuid(run_id)},
     ).mappings()

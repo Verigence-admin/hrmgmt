@@ -173,6 +173,24 @@ def test_hr_cannot_decide_their_own_exception(world, migrated_engine):
     assert own.status_code == 404
 
 
+def test_people_are_listed_alphabetically_whatever_their_codes(world):
+    admin, keeper = _hr(world)
+    for name in ("Chandini Nayak", "akash Das", "Bina Rout"):
+        _, user = world.employee(admin, full_name=name)
+        world.assign(user, "PC", outlet=OUTLET, project=("PA", "Project A"))
+    rows = world.client.get(
+        "/hr/v1/attendance/daily",
+        params={"date": "2026-10-05", "projectCode": "PA"},
+        headers=world.headers(keeper),
+    ).json()["rows"]
+    assert [r["employeeName"] for r in rows] == ["akash Das", "Bina Rout", "Chandini Nayak"]
+    listed = world.client.get(
+        "/hr/v1/employees", params={"limit": 100}, headers=world.headers(admin)
+    )
+    names = [e["fullName"] for e in listed.json()["items"]]
+    assert names == sorted(names, key=str.lower)
+
+
 def test_a_person_on_two_projects_appears_once_for_each_and_can_be_filtered(world):
     admin, keeper = _hr(world)
     emp, user = _person(world, admin)

@@ -527,7 +527,7 @@ def leave_overview(
         (str(r[0]), r[1], r[2])
         for r in conn.execute(
             text(
-                "SELECT employee_id, employee_code, full_name FROM hr.employee WHERE employment_status = 'ACTIVE' ORDER BY employee_code"
+                "SELECT employee_id, employee_code, full_name FROM hr.employee WHERE employment_status = 'ACTIVE' ORDER BY lower(full_name), employee_code"
             )
         )
     ]

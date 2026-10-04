@@ -700,7 +700,7 @@ def team_attendance(
                   AND a.work_date >= :a AND a.work_date < :b
             WHERE e.employment_status = 'ACTIVE'
             GROUP BY e.employee_id, e.employee_code, e.full_name
-            ORDER BY e.employee_code
+            ORDER BY lower(e.full_name), e.employee_code
             """
         ),
         {"a": first, "b": nxt},
