@@ -15,6 +15,7 @@ from hrmgmt.api.claims import router as claims_router
 from hrmgmt.api.employee_import import router as employee_import_router
 from hrmgmt.api.employees import router as employees_router
 from hrmgmt.api.leave import router as leave_router
+from hrmgmt.api.messages import router as messages_router
 from hrmgmt.api.meta import router as meta_router
 from hrmgmt.api.payroll import router as payroll_router
 from hrmgmt.authz import SecurityAuthorizer
@@ -22,6 +23,7 @@ from hrmgmt.config import Settings, get_settings
 from hrmgmt.db import get_engine
 from hrmgmt.errors import install_error_handlers
 from hrmgmt.geocode import GoogleReverseGeocoder
+from hrmgmt.mailer import SmtpMailer
 from hrmgmt.provisioning import SecurityUserProvisioner
 from hrmgmt.security import SecurityTokenValidator
 from hrmgmt.storage import S3Storage
@@ -52,6 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.geocoder = None
     app.state.workcontext = None
     app.state.clock = None
+    app.state.mailer = None
     if settings.security_jwks_url and settings.security_issuer and settings.security_audience:
         app.state.validator = SecurityTokenValidator(
             jwks_url=settings.security_jwks_url,
@@ -96,12 +99,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:
         logger.warning("hr_work_context_not_configured")
 
+    if settings.mail_configured:
+        app.state.mailer = SmtpMailer(
+            host=settings.smtp_host,
+            port=settings.smtp_port,
+            user=settings.smtp_user,
+            password=settings.smtp_password,
+            from_address=settings.smtp_from or None,
+        )
+    else:
+        logger.warning("hr_email_not_configured")
+
     app.include_router(admin_router)
     app.include_router(attendance_router)
     app.include_router(leave_router)
     app.include_router(claims_router)
     app.include_router(payroll_router)
     app.include_router(employee_import_router)
+    app.include_router(messages_router)
     app.include_router(employees_router)
 
     @app.get("/health")

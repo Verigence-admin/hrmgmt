@@ -86,6 +86,18 @@ SPECS: dict[str, Spec] = {
     ),
     "company.pan": Spec("text", "", label="Company PAN", group="Company"),
     "company.pf_registration": Spec("text", "", label="PF registration number", group="Company"),
+    "email.sign_in_url": Spec(
+        "text",
+        "https://verigence-web-dev.jbrconsulting-it.workers.dev",
+        label="Sign-in link put in employee emails",
+        group="Email",
+    ),
+    "email.app_download_url": Spec(
+        "text",
+        "https://verigence-web-dev.jbrconsulting-it.workers.dev/apps",
+        label="Mobile app download link put in employee emails (inside Verigence)",
+        group="Email",
+    ),
     "company.esi_registration": Spec("text", "", label="ESI registration number", group="Company"),
 }
 

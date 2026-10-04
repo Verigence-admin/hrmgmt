@@ -14,7 +14,7 @@ from sqlalchemy import text
 from hrmgmt import permissions as perm
 from hrmgmt.config import Settings
 from hrmgmt.main import create_app
-from hrmgmt.provisioning import CreatedLogin, FoundLogin
+from hrmgmt.provisioning import CreatedLogin, FoundLogin, ProvisioningError
 from hrmgmt.storage import StorageError
 from tests.test_api import FakeAuthorizer, FakeValidator
 
@@ -53,6 +53,12 @@ class FakeProvisioner:
 
     def mark_employee(self, *, user_id):
         self.marked = getattr(self, "marked", []) + [user_id]
+
+    def set_password(self, *, user_id, password):
+        self.passwords = getattr(self, "passwords", []) + [(user_id, password)]
+        if getattr(self, "set_password_error", None):
+            raise ProvisioningError(self.set_password_error, "x")
+        return f"login-{user_id[:8]}@example.com"
 
 
 class FakeGeocoder:

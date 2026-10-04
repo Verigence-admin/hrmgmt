@@ -39,6 +39,8 @@ class UserProvisioner(Protocol):
 
     def mark_employee(self, *, user_id: str) -> None: ...
 
+    def set_password(self, *, user_id: str, password: str) -> str | None: ...
+
 
 class SecurityUserProvisioner:
     """Creates an ACTIVE Verigence user (identity-provider account with a verified email, no
@@ -158,3 +160,35 @@ class SecurityUserProvisioner:
             raise ProvisioningError(
                 "SECURITY_UNAVAILABLE", f"Security answered HTTP {response.status_code}"
             )
+
+    def set_password(self, *, user_id: str, password: str) -> str | None:
+        """Sets a temporary password for an ACTIVE user and returns their sign-in email.
+        Security refuses (409) a user who is not active yet. One attempt, no retries."""
+        try:
+            token = self._token_provider()
+        except Exception as exc:
+            raise ProvisioningError("SECURITY_UNAVAILABLE", "Security is not reachable") from exc
+        try:
+            response = self._client.post(
+                f"/security/v1/service/users/{user_id}/password",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"password": password},
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("hr_set_password_failed", reason="endpoint_unavailable")
+            raise ProvisioningError("SECURITY_UNAVAILABLE", "Security is not reachable") from exc
+        status = response.status_code
+        if status == 200:
+            try:
+                email = response.json().get("primaryEmail")
+            except ValueError:
+                email = None
+            return email if isinstance(email, str) and email else None
+        logger.warning("hr_set_password_failed", http_status=status)
+        if status == 409:
+            raise ProvisioningError("LOGIN_NOT_ACTIVE", "The login is not active yet")
+        if status == 404:
+            raise ProvisioningError("LOGIN_NOT_FOUND", "The login was not found")
+        if status in (401, 403):
+            raise ProvisioningError("NOT_PERMITTED", "HRMgmt is not allowed to set passwords")
+        raise ProvisioningError("SECURITY_UNAVAILABLE", f"Security answered HTTP {status}")

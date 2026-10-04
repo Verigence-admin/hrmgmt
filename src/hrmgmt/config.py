@@ -46,6 +46,15 @@ class Settings:
     db_max_overflow: int
     audit_core_base_url: str = ""
     google_maps_api_key: str = ""
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+
+    @property
+    def mail_configured(self) -> bool:
+        return bool(self.smtp_host and self.smtp_user and self.smtp_password)
 
     @property
     def storage_configured(self) -> bool:
@@ -103,6 +112,11 @@ def load_settings() -> Settings:
             os.environ.get("HR_GOOGLE_MAPS_API_KEY", "")
             or os.environ.get("GOOGLE_MAPS_API_KEY", "")
         ).strip(),
+        smtp_host=os.environ.get("HR_SMTP_HOST", "").strip() or "smtp.gmail.com",
+        smtp_port=_int("HR_SMTP_PORT", 587, 1, 65535),
+        smtp_user=os.environ.get("HR_SMTP_USER", "").strip(),
+        smtp_password=os.environ.get("HR_SMTP_PASSWORD", ""),
+        smtp_from=os.environ.get("HR_SMTP_FROM", "").strip(),
     )
 
 

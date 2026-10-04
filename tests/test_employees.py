@@ -67,6 +67,12 @@ class FakeProvisioner:
     def mark_employee(self, *, user_id):
         self.marked = getattr(self, "marked", []) + [user_id]
 
+    def set_password(self, *, user_id, password):
+        self.passwords = getattr(self, "passwords", []) + [(user_id, password)]
+        if getattr(self, "set_password_error", None):
+            raise ProvisioningError(self.set_password_error, "x")
+        return f"login-{user_id[:8]}@example.com"
+
 
 def _settings() -> Settings:
     return Settings(
@@ -903,3 +909,20 @@ def test_provisioner_marks_an_employee_once_with_the_service_token():
         with pytest.raises(ProvisioningError):
             p.mark_employee(user_id="u-9")
         assert len(s) == 1
+
+
+def test_provisioner_sets_a_password_once_and_maps_the_answers():
+    prov, sent = _provisioner(200, {"userId": "u-9", "primaryEmail": "a@b.co"})
+    assert prov.set_password(user_id="u-9", password="Temp-Pass-123") == "a@b.co"
+    assert len(sent) == 1 and sent[0].url.path == "/security/v1/service/users/u-9/password"
+    assert b"Temp-Pass-123" in sent[0].content and sent[0].headers["authorization"] == "Bearer svc"
+    for status, code in (
+        (409, "LOGIN_NOT_ACTIVE"),
+        (404, "LOGIN_NOT_FOUND"),
+        (403, "NOT_PERMITTED"),
+        (500, "SECURITY_UNAVAILABLE"),
+    ):
+        p, s = _provisioner(status)
+        with pytest.raises(ProvisioningError) as err:
+            p.set_password(user_id="u-9", password="Temp-Pass-123")
+        assert err.value.code == code and len(s) == 1
