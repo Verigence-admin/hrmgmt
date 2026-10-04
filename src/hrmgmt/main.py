@@ -13,6 +13,7 @@ from hrmgmt.api.employee_import import router as employee_import_router
 from hrmgmt.api.employees import router as employees_router
 from hrmgmt.api.leave import router as leave_router
 from hrmgmt.api.meta import router as meta_router
+from hrmgmt.api.payroll import router as payroll_router
 from hrmgmt.authz import SecurityAuthorizer
 from hrmgmt.config import Settings, get_settings
 from hrmgmt.db import get_engine
@@ -96,6 +97,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(attendance_router)
     app.include_router(leave_router)
     app.include_router(claims_router)
+    app.include_router(payroll_router)
     app.include_router(employee_import_router)
     app.include_router(employees_router)
 

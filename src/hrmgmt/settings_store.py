@@ -14,7 +14,7 @@ from hrmgmt.errors import ApiError
 
 @dataclass(frozen=True)
 class Spec:
-    kind: str  # "time", "int", "money" or "money_or_null"
+    kind: str  # "time", "int", "money", "money_or_null" or "text"
     default: Any
     low: float | None = None
     high: float | None = None
@@ -93,6 +93,12 @@ def validate(key: str, value: Any) -> Any:
         if not isinstance(value, str) or not _TIME.match(value):
             raise ApiError(422, "HR_SETTING_INVALID", f"{spec.label}: use a time like 10:30.")
         return value
+    if spec.kind == "text":
+        if value is None:
+            value = ""
+        if not isinstance(value, str) or len(value.strip()) > 300:
+            raise ApiError(422, "HR_SETTING_INVALID", f"{spec.label}: use up to 300 characters.")
+        return " ".join(value.split())
     if spec.kind == "money_or_null" and value in (None, ""):
         return None
     if isinstance(value, bool) or not isinstance(value, int | float | str):
