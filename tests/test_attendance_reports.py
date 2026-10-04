@@ -213,3 +213,21 @@ def test_work_assignments_list_each_employees_projects_roles_and_outlets(world):
         "/hr/v1/work-assignments", params={"projectCode": "P2"}, headers=world.headers(keeper)
     ).json()
     assert [e["employeeCode"] for e in only["employees"]] == [emp["employeeCode"]]
+
+
+def test_the_employee_list_names_each_persons_current_projects(world):
+    admin, keeper = _hr(world)
+    emp, user = _person(world, admin)
+    lone, _ = _person(world, admin)
+    world.assign(user, "PC", outlet=OUTLET, project=("P1", "Project One"))
+    world.assign(
+        user,
+        "PC",
+        outlet=("Unmapped", None, None),
+        tenant="tenant-b",
+        project=("P2", "Project Two"),
+    )
+    body = world.client.get("/hr/v1/employees", headers=world.headers(keeper)).json()
+    people = {e["employeeCode"]: e for e in body["items"]}
+    assert people[emp["employeeCode"]]["projects"] == ["Project One", "Project Two"]
+    assert people[lone["employeeCode"]]["projects"] == []

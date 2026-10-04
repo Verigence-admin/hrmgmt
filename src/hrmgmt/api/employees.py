@@ -650,6 +650,25 @@ def link_login(
     return {"employee": _view(_fetch(conn, employee_id))}
 
 
+def _current_projects(conn: Connection, employee_ids: list[str]) -> dict[str, list[str]]:
+    """Project names each listed employee is assigned to right now (the daily copy from Audit Core)."""
+    if not employee_ids:
+        return {}
+    found: dict[str, list[str]] = {}
+    for r in conn.execute(
+        text(
+            "SELECT DISTINCT e.employee_id, a.project_name FROM hr.employee e"
+            " JOIN hr.work_assignment a ON a.security_user_id = e.security_user_id"
+            " WHERE e.employee_id = ANY(CAST(:ids AS uuid[])) AND a.project_name IS NOT NULL"
+            " AND a.valid_from <= now() AND (a.valid_to IS NULL OR a.valid_to > now())"
+            " ORDER BY a.project_name"
+        ),
+        {"ids": employee_ids},
+    ):
+        found.setdefault(str(r[0]), []).append(r[1])
+    return found
+
+
 @router.get("/employees")
 def list_employees(
     q: Annotated[str | None, Query(max_length=80)] = None,
@@ -678,7 +697,11 @@ def list_employees(
         .mappings()
         .all()
     )
-    return {"total": total, "items": [_view(r) for r in rows]}
+    items = [_view(r) for r in rows]
+    projects = _current_projects(conn, [i["employeeId"] for i in items])
+    for item in items:
+        item["projects"] = projects.get(item["employeeId"], [])
+    return {"total": total, "items": items}
 
 
 @router.get("/employees/{employee_id}")
