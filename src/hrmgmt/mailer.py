@@ -63,9 +63,22 @@ class SmtpMailer:
         message.add_alternative(body_to_html(body), subtype="html")
         stage = "connect"
         try:
-            with smtplib.SMTP(self._host, self._port, timeout=self._timeout) as server:
-                stage = "starttls"
-                server.starttls(context=ssl.create_default_context())
+            if self._port == 465:
+                # Port 465 is encrypted from the first byte; every other port upgrades with STARTTLS.
+                server = smtplib.SMTP_SSL(
+                    self._host,
+                    self._port,
+                    timeout=self._timeout,
+                    context=ssl.create_default_context(),
+                )
+            else:
+                server = smtplib.SMTP(self._host, self._port, timeout=self._timeout)
+            with server:
+                if self._port != 465:
+                    stage = "starttls"
+                    server.starttls(context=ssl.create_default_context())
+                stage = "hello"
+                server.ehlo()
                 stage = "login"
                 server.login(self._user, self._password)
                 stage = "send"
