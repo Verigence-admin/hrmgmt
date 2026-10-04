@@ -112,7 +112,12 @@ def test_parser_reads_numbers_dates_and_skips_blank_rows():
     assert v["employee_code"] == "IMA1" and v["mobile"] == "9876543210"
     assert v["aadhaar"] == "123456789012" and v["gender"] == "FEMALE"
     assert v["date_of_birth"].isoformat() == "1995-04-02"
-    assert v["qualification"] == "B com,MBA" and rows[0].errors == [] and rows[0].notes == []
+    assert v["qualification"] == "B com,MBA" and rows[0].errors == []
+    assert rows[0].notes == [
+        "District is missing.",
+        "University is missing.",
+        "College name is missing.",
+    ]
     assert rows[0].row == 2  # the sheet row number, shown to the person
 
 
@@ -286,3 +291,93 @@ def test_running_the_same_commit_twice_does_not_duplicate(make_client):
     first = upload(client, "/hr/v1/employees/import/commit", data, rows="2").json()["results"][0]
     second = upload(client, "/hr/v1/employees/import/commit", data, rows="2").json()["results"][0]
     assert first["status"] == "CREATED" and second["status"] == "SKIPPED"
+
+
+# ---- onboarding columns --------------------------------------------------------------------
+
+FULL_HEADER = [
+    *HEADER,
+    "State",
+    "District",
+    "Pincode",
+    "Years of Experience",
+    "Emergency Contact Name",
+    "Emergency Contact Number",
+    "Degree",
+    "Percentage",
+    "Year of Passing",
+    "University",
+    "College Name",
+]
+
+
+def full_row(n: str, **over):
+    extra = {
+        "state": "odisha",
+        "district": "Cuttack",
+        "pincode": 753001,
+        "exp": 3.5,
+        "ec_name": "Ravi Rao",
+        "ec_number": 9123456789,
+        "degree": "BCOM",
+        "pct": 68,
+        "year": 2020,
+        "university": "Utkal University",
+        "college": "Ravenshaw College",
+    }
+    extra.update(over)
+    return good_row(n) + list(extra.values())
+
+
+def test_parser_reads_the_onboarding_columns():
+    r = parse_employee_sheet(sheet([full_row("F1")], header=FULL_HEADER))[0]
+    v = r.values
+    assert v["state"] == "Odisha" and v["district"] == "Cuttack" and v["pincode"] == "753001"
+    assert str(v["experience"]) == "3.5" and v["emergency_number"] == "9123456789"
+    assert v["university"] == "Utkal University" and v["college"] == "Ravenshaw College"
+    assert v["year_of_passing"] == 2020 and str(v["percentage"]) == "68.00"
+    assert r.errors == [] and r.notes == []
+
+
+def test_missing_district_university_college_are_notes_and_bad_values_are_left_empty():
+    r = parse_employee_sheet(
+        sheet(
+            [
+                full_row(
+                    "F2",
+                    state="Atlantis",
+                    district=None,
+                    pincode=12,
+                    university=None,
+                    college=None,
+                    ec_number=123,
+                    exp=99,
+                )
+            ],
+            header=FULL_HEADER,
+        )
+    )[0]
+    assert r.errors == []
+    v = r.values
+    assert v["state"] is None and v["pincode"] is None and v["emergency_number"] is None
+    assert v["experience"] is None
+    joined = " ".join(r.notes)
+    for word in ("District is missing", "University is missing", "College name is missing"):
+        assert word in joined
+
+
+def test_commit_saves_profile_and_one_qualification_when_the_degree_is_in_the_list(make_client):
+    client, _ = make_client()
+    data = sheet([full_row("G1"), full_row("G2", degree="Some Unknown Degree")], header=FULL_HEADER)
+    pre = upload(client, "/hr/v1/employees/import/preview", data).json()["rows"]
+    assert not any("qualification, university" in n for n in pre[0]["notes"])
+    assert any("qualification, university" in n for n in pre[1]["notes"])
+    r = upload(client, "/hr/v1/employees/import/commit", data, rows="2,3", create_login="false")
+    first, second = r.json()["results"]
+    emp = client.get(f"/hr/v1/employees/{first['employeeId']}", headers=auth(HR)).json()
+    assert emp["district"] == "Cuttack" and emp["state"] == "Odisha"
+    assert emp["totalExperienceYears"] == 3.5 and emp["emergencyContactNumber"] == "9123456789"
+    assert emp["qualifications"][0]["university"] == "Utkal University"
+    assert emp["qualifications"][0]["college"] == "Ravenshaw College"
+    other = client.get(f"/hr/v1/employees/{second['employeeId']}", headers=auth(HR)).json()
+    assert other["qualifications"] == [] and "QUALIFICATION" in other["missingDetails"]

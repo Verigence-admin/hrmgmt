@@ -958,3 +958,42 @@ def test_provisioner_sets_a_password_once_and_maps_the_answers():
         with pytest.raises(ProvisioningError) as err:
             p.set_password(user_id="u-9", password="Temp-Pass-123")
         assert err.value.code == code and len(s) == 1
+
+
+def test_district_university_college_round_trip_and_pending_details_clear_themselves(make_client):
+    client, _ = make_client()
+    r = client.post("/hr/v1/employees", json=payload(), headers=auth(HR))
+    assert r.status_code == 201
+    emp = r.json()["employee"]
+    eid = emp["employeeId"]
+    assert emp["district"] is None
+    assert {
+        "DISTRICT",
+        "STATE",
+        "PINCODE",
+        "EMERGENCY_CONTACT",
+        "EXPERIENCE",
+        "QUALIFICATION",
+        "SALARY",
+    } <= set(emp["missingDetails"])
+    q = {"degree_code": "BCOM", "percentage": 70, "year_of_passing": 2020}
+    added = client.post(f"/hr/v1/employees/{eid}/qualifications", json=q, headers=auth(HR))
+    assert added.status_code == 201
+    now = client.get(f"/hr/v1/employees/{eid}", headers=auth(HR)).json()
+    assert (
+        "UNIVERSITY_COLLEGE" in now["missingDetails"]
+        and "QUALIFICATION" not in now["missingDetails"]
+    )
+    qid = now["qualifications"][0]["qualificationId"]
+    done = client.put(
+        f"/hr/v1/employees/{eid}/qualifications/{qid}",
+        json={**q, "university": "Utkal University", "college": "Ravenshaw College"},
+        headers=auth(HR),
+    )
+    assert done.status_code == 200
+    client.patch(f"/hr/v1/employees/{eid}", json={"district": "Cuttack"}, headers=auth(HR))
+    after = client.get(f"/hr/v1/employees/{eid}", headers=auth(HR)).json()
+    assert after["district"] == "Cuttack"
+    assert after["qualifications"][0]["university"] == "Utkal University"
+    assert "DISTRICT" not in after["missingDetails"]
+    assert "UNIVERSITY_COLLEGE" not in after["missingDetails"]

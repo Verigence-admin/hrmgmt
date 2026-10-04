@@ -10,7 +10,12 @@ from sqlalchemy import Connection, text
 
 from hrmgmt import permissions as perm
 from hrmgmt import validators as v
-from hrmgmt.api.employees import EmployeeCreate, create_employee_record, get_provisioner
+from hrmgmt.api.employees import (
+    EmployeeCreate,
+    QualificationIn,
+    create_employee_record,
+    get_provisioner,
+)
 from hrmgmt.audit import record_audit
 from hrmgmt.db import get_conn
 from hrmgmt.errors import ApiError
@@ -61,6 +66,45 @@ def _existing(conn: Connection, rows: list[ParsedRow]) -> tuple[set[str], set[st
     )
 
 
+def _degrees(conn: Connection) -> dict[str, str]:
+    """Catalogue degrees by lower-case code and label, so a sheet can name one either way."""
+    found: dict[str, str] = {}
+    for r in conn.execute(text("SELECT code, label FROM hr.degree")):
+        found[str(r[0]).lower()] = str(r[0])
+        found[str(r[1]).lower()] = str(r[0])
+    return found
+
+
+def _qualification(row: ParsedRow, degrees: dict[str, str]) -> QualificationIn | None:
+    """One structured qualification, only when the degree is in the catalogue and the marks and
+    year are given. Otherwise nothing is guessed; the row is noted and HR adds it on the page."""
+    values = row.values
+    if not (values["degree"] or values["university"] or values["college"]):
+        return None
+    code = degrees.get((values["degree"] or "").lower())
+    if code is None or values["percentage"] is None or values["year_of_passing"] is None:
+        return None
+    return QualificationIn(
+        degree_code=code,
+        percentage=values["percentage"],
+        year_of_passing=values["year_of_passing"],
+        university=values["university"],
+        college=values["college"],
+    )
+
+
+def _qualification_note(row: ParsedRow, degrees: dict[str, str]) -> str | None:
+    values = row.values
+    if not (values["degree"] or values["university"] or values["college"]):
+        return None
+    if _qualification(row, degrees) is None:
+        return (
+            "Degree (as in the list), percentage and year of passing are all needed to save the "
+            "qualification, university and college; add them on the employee's page."
+        )
+    return None
+
+
 def _status(row: ParsedRow, codes: set[str], emails: set[str]) -> str:
     if row.errors:
         return "ERROR"
@@ -80,6 +124,7 @@ async def preview_import(
     """Read the sheet and say what would happen. Nothing is saved."""
     rows = _parse(await _read_upload(file))
     codes, emails, pans = _existing(conn, rows)
+    degrees = _degrees(conn)
     file_pans: dict[str, int] = {}
     for r in rows:
         if r.values["pan"]:
@@ -96,6 +141,9 @@ async def preview_import(
         pan = r.values["pan"]
         if pan and (pan in pans or file_pans[pan] > 1):
             notes.append("PAN is also used by another employee; saved and flagged for HR.")
+        qualification_note = _qualification_note(r, degrees)
+        if qualification_note:
+            notes.append(qualification_note)
         out.append(
             {
                 "row": r.row,
@@ -110,6 +158,9 @@ async def preview_import(
                 "gender": r.values["gender"],
                 "department": r.values["department"],
                 "qualification": r.values["qualification"],
+                "state": r.values["state"],
+                "district": r.values["district"],
+                "pincode": r.values["pincode"],
                 "panMasked": v.mask_pan(pan),
                 "aadhaarMasked": v.mask_aadhaar(r.values["aadhaar"]),
                 "notes": notes,
@@ -153,6 +204,7 @@ async def commit_import(
     data = await _read_upload(file)
     parsed = {r.row: r for r in _parse(data)}
     codes, emails, _ = _existing(conn, list(parsed.values()))
+    degrees = _degrees(conn)
 
     results: list[dict[str, Any]] = []
     for number in wanted:
@@ -178,6 +230,13 @@ async def commit_import(
                 qualification=row.values["qualification"],
                 department=row.values["department"],
                 address=row.values["address"],
+                state=row.values["state"],
+                district=row.values["district"],
+                pincode=row.values["pincode"],
+                total_experience_years=row.values["experience"],
+                emergency_contact_name=row.values["emergency_name"],
+                emergency_contact_number=row.values["emergency_number"],
+                qualifications=[q] if (q := _qualification(row, degrees)) else [],
                 date_of_joining=row.values["date_of_joining"],
                 pan=row.values["pan"],
                 aadhaar=row.values["aadhaar"],

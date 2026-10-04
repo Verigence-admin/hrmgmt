@@ -51,9 +51,14 @@ class QualificationIn(_Strict):
     degree_other: str | None = Field(default=None, max_length=120)
     percentage: Decimal = Field(ge=0, le=100, decimal_places=2)
     year_of_passing: int = Field(ge=1950, le=2100)
+    # Required in practice; a record can be saved without them and then shows a pending note.
+    university: str | None = Field(default=None, max_length=150)
+    college: str | None = Field(default=None, max_length=150)
 
     @model_validator(mode="after")
     def _other_needs_a_name(self) -> QualificationIn:
+        self.university = v.clean_text(self.university)
+        self.college = v.clean_text(self.college)
         if self.year_of_passing > date.today().year:
             raise ValueError("Year of passing cannot be in the future")
         if self.degree_code == "OTHER":
@@ -89,6 +94,7 @@ class EmployeeCreate(_Strict):
     department: str | None = Field(default=None, max_length=60)
     address: str | None = Field(default=None, max_length=500)
     state: str | None = Field(default=None, max_length=60)
+    district: str | None = Field(default=None, max_length=80)
     pincode: str | None = Field(default=None, max_length=10)
     total_experience_years: Decimal | None = Field(default=None, ge=0, le=60, decimal_places=1)
     emergency_contact_name: str | None = Field(default=None, max_length=120)
@@ -129,6 +135,7 @@ class EmployeeUpdate(_Strict):
     designation_code: str | None = Field(default=None, max_length=40)
     address: str | None = Field(default=None, max_length=500)
     state: str | None = Field(default=None, max_length=60)
+    district: str | None = Field(default=None, max_length=80)
     pincode: str | None = Field(default=None, max_length=10)
     total_experience_years: Decimal | None = Field(default=None, ge=0, le=60, decimal_places=1)
     emergency_contact_name: str | None = Field(default=None, max_length=120)
@@ -171,6 +178,7 @@ class SelfUpdate(_Strict):
 
     address: str | None = Field(default=None, max_length=500)
     state: str | None = Field(default=None, max_length=60)
+    district: str | None = Field(default=None, max_length=80)
     pincode: str | None = Field(default=None, max_length=10)
     emergency_contact_name: str | None = Field(default=None, max_length=120)
     emergency_contact_number: str | None = Field(default=None, max_length=40)
@@ -193,14 +201,30 @@ class SelfUpdate(_Strict):
 
 _PUBLIC_COLUMNS = """
     e.employee_id, e.employee_code, e.full_name, e.date_of_birth, e.gender, e.mobile,
-    e.personal_email, e.secondary_email, e.qualification, e.state, e.pincode,
+    e.personal_email, e.secondary_email, e.qualification, e.state, e.district, e.pincode,
     e.total_experience_years, e.emergency_contact_address, e.photo_updated_at, e.department, e.designation_code,
     d.label AS designation, e.address, e.emergency_contact_name, e.emergency_contact_number,
     e.date_of_joining, e.employment_status, e.login_status, e.login_error_code,
     s.pan, s.aadhaar,
     (s.pan IS NOT NULL AND EXISTS (
         SELECT 1 FROM hr.employee_sensitive o
-        WHERE o.pan = s.pan AND o.employee_id <> e.employee_id)) AS pan_duplicate
+        WHERE o.pan = s.pan AND o.employee_id <> e.employee_id)) AS pan_duplicate,
+    (SELECT count(*) FROM hr.employee_qualification q
+        WHERE q.employee_id = e.employee_id) AS qualification_count,
+    (SELECT count(*) FROM hr.employee_qualification q
+        WHERE q.employee_id = e.employee_id
+          AND (coalesce(q.university, '') = '' OR coalesce(q.college, '') = '')) AS qualification_incomplete,
+    CASE
+        WHEN EXISTS (SELECT 1 FROM hr.salary_structure x WHERE x.employee_id = e.employee_id
+                     AND x.status = 'APPROVED'
+                     AND x.effective_from <= (now() AT TIME ZONE 'Asia/Kolkata')::date)
+            THEN 'APPROVED'
+        WHEN EXISTS (SELECT 1 FROM hr.salary_structure x WHERE x.employee_id = e.employee_id
+                     AND x.status = 'PROPOSED') THEN 'WAITING_FINANCE'
+        WHEN EXISTS (SELECT 1 FROM hr.salary_structure x WHERE x.employee_id = e.employee_id
+                     AND x.status = 'APPROVED') THEN 'APPROVED_FROM_LATER'
+        ELSE 'NONE'
+    END AS salary_status
 """
 _FROM = """
     FROM hr.employee e
@@ -235,6 +259,7 @@ def _view(row: Any) -> dict[str, Any]:
         "designation": row["designation"],
         "address": row["address"],
         "state": row["state"],
+        "district": row["district"],
         "pincode": row["pincode"],
         "totalExperienceYears": (
             float(row["total_experience_years"])
@@ -252,7 +277,32 @@ def _view(row: Any) -> dict[str, Any]:
         "panMasked": v.mask_pan(row["pan"]),
         "aadhaarMasked": v.mask_aadhaar(row["aadhaar"]),
         "dataFlags": flags,
+        "salaryStatus": row["salary_status"],
+        "missingDetails": _missing_details(row),
     }
+
+
+def _missing_details(row: Any) -> list[str]:
+    """The automatic "Pending details" note: what is still needed for a complete record. It is
+    worked out from the data each time, so it clears itself when the details are filled in."""
+    missing: list[str] = []
+    if not row["state"]:
+        missing.append("STATE")
+    if not row["district"]:
+        missing.append("DISTRICT")
+    if not row["pincode"]:
+        missing.append("PINCODE")
+    if not (row["emergency_contact_name"] and row["emergency_contact_number"]):
+        missing.append("EMERGENCY_CONTACT")
+    if row["total_experience_years"] is None:
+        missing.append("EXPERIENCE")
+    if not row["qualification_count"]:
+        missing.append("QUALIFICATION")
+    elif row["qualification_incomplete"]:
+        missing.append("UNIVERSITY_COLLEGE")
+    if row["salary_status"] == "NONE":
+        missing.append("SALARY")
+    return missing
 
 
 def _fetch(conn: Connection, employee_id: str) -> Any:
@@ -362,11 +412,11 @@ def create_employee_record(
                     """
                     INSERT INTO hr.employee
                         (employee_code, full_name, date_of_birth, gender, mobile, personal_email,
-                         qualification, department, address, state, pincode,
+                         qualification, department, address, state, district, pincode,
                          total_experience_years, emergency_contact_name, emergency_contact_number,
                          emergency_contact_address, date_of_joining, created_by, updated_by)
                     VALUES (:code, :name, :dob, :gender, :mobile, :email, :qual, :dept, :addr,
-                            :state, :pincode, :exp, :ec_name, :ec_number, :ec_addr,
+                            :state, :district, :pincode, :exp, :ec_name, :ec_number, :ec_addr,
                             :doj, :actor, :actor)
                     RETURNING employee_id
                     """
@@ -382,6 +432,7 @@ def create_employee_record(
                     "dept": v.clean_text(body.department),
                     "addr": v.clean_text(body.address),
                     "state": body.state,
+                    "district": v.clean_text(body.district),
                     "pincode": body.pincode,
                     "exp": body.total_experience_years,
                     "ec_name": v.clean_text(body.emergency_contact_name),
@@ -628,7 +679,7 @@ def update_employee(
             ).first()
             if known is None:
                 raise conflict("DESIGNATION_UNKNOWN", "Choose one of the listed designations.")
-        if field in ("full_name", "qualification", "department", "address"):
+        if field in ("full_name", "qualification", "department", "address", "district"):
             value = v.clean_text(value)
         old = before[field] if field in before else None
         old_out = old.isoformat() if isinstance(old, date) else old
@@ -729,8 +780,8 @@ def _insert_qualification(
                 """
                 INSERT INTO hr.employee_qualification
                     (employee_id, degree_code, degree_other, percentage, year_of_passing,
-                     created_by, updated_by)
-                VALUES (CAST(:e AS uuid), :d, :o, :p, :y, :a, :a)
+                     university, college, created_by, updated_by)
+                VALUES (CAST(:e AS uuid), :d, :o, :p, :y, :u, :c, :a, :a)
                 RETURNING qualification_id
                 """
             ),
@@ -740,6 +791,8 @@ def _insert_qualification(
                 "o": q.degree_other,
                 "p": q.percentage,
                 "y": q.year_of_passing,
+                "u": q.university,
+                "c": q.college,
                 "a": actor,
             },
         ).scalar_one()
@@ -752,7 +805,7 @@ def _qualifications(conn: Connection, employee_id: str) -> list[dict[str, Any]]:
             text(
                 """
                 SELECT q.qualification_id, q.degree_code, d.label, d.level, q.degree_other,
-                       q.percentage, q.year_of_passing
+                       q.percentage, q.year_of_passing, q.university, q.college
                 FROM hr.employee_qualification q JOIN hr.degree d ON d.code = q.degree_code
                 WHERE q.employee_id = CAST(:e AS uuid)
                 ORDER BY q.year_of_passing DESC, q.created_at
@@ -771,6 +824,8 @@ def _qualifications(conn: Connection, employee_id: str) -> list[dict[str, Any]]:
             "level": r["level"],
             "percentage": float(r["percentage"]),
             "yearOfPassing": r["year_of_passing"],
+            "university": r["university"],
+            "college": r["college"],
         }
         for r in rows
     ]
@@ -851,7 +906,7 @@ def replace_qualification(
             """
             UPDATE hr.employee_qualification
             SET degree_code = :d, degree_other = :o, percentage = :p, year_of_passing = :y,
-                updated_at = now(), updated_by = :a
+                university = :u, college = :c, updated_at = now(), updated_by = :a
             WHERE qualification_id = CAST(:q AS uuid) AND employee_id = CAST(:e AS uuid)
             """
         ),
@@ -860,6 +915,8 @@ def replace_qualification(
             "o": body.degree_other,
             "p": body.percentage,
             "y": body.year_of_passing,
+            "u": body.university,
+            "c": body.college,
             "a": user.user_id,
             "q": qualification_id,
             "e": employee_id,
@@ -1080,7 +1137,7 @@ def update_my_record(
     changes: dict[str, Any] = {}
     updates: dict[str, Any] = {}
     for field, value in sent.items():
-        if field in ("address", "emergency_contact_name"):
+        if field in ("address", "emergency_contact_name", "district"):
             value = v.clean_text(value)
         if before[field] != value:
             updates[field] = value

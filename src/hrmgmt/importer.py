@@ -12,11 +12,13 @@ import re
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from openpyxl import load_workbook
 
 from hrmgmt import validators as v
+from hrmgmt.catalog import canonical_state
 
 MAX_IMPORT_BYTES = 2 * 1024 * 1024
 MAX_SHEET_ROWS = 1000  # rows read; an empty-but-formatted sheet can claim far more
@@ -53,6 +55,23 @@ _ALIASES: dict[str, str] = {
     "aadhar number": "aadhaar",
     "aadhaar number": "aadhaar",
     "address": "address",
+    "state": "state",
+    "district": "district",
+    "pincode": "pincode",
+    "pin code": "pincode",
+    "years of experience": "experience",
+    "experience": "experience",
+    "total experience": "experience",
+    "emergency contact name": "emergency_name",
+    "emergency contact number": "emergency_number",
+    "emergency contact": "emergency_number",
+    "degree": "degree",
+    "percentage": "percentage",
+    "year of passing": "year_of_passing",
+    "passing year": "year_of_passing",
+    "university": "university",
+    "college": "college",
+    "college name": "college",
     "date of joining": "date_of_joining",
     "doj": "date_of_joining",
 }
@@ -140,6 +159,78 @@ def _read_sheet(data: bytes) -> list[tuple[int, dict[str, Any]]]:
     return rows
 
 
+def _read_onboarding_details(record: dict[str, Any], row: ParsedRow) -> None:
+    """State, district, pincode, experience, emergency contact and one qualification. A value that
+    is not valid is left empty and noted; a missing district, university or college is noted so
+    HR fills it in later."""
+    values = row.values
+
+    state = _text(record.get("state"))
+    values["state"] = None
+    if state:
+        try:
+            values["state"] = canonical_state(state)
+        except ValueError:
+            row.notes.append("State is not recognised; left empty.")
+    district = _text(record.get("district"))
+    values["district"] = district[:80] if district else None
+    if not district:
+        row.notes.append("District is missing.")
+
+    pincode = _text(record.get("pincode"))
+    values["pincode"] = None
+    if pincode:
+        if len(pincode) == 6 and pincode.isdigit() and pincode[0] != "0":
+            values["pincode"] = pincode
+        else:
+            row.notes.append("Pincode is not 6 digits; left empty.")
+
+    experience = _text(record.get("experience"))
+    values["experience"] = None
+    if experience:
+        try:
+            years = Decimal(experience)
+            if years < 0 or years > 60:
+                raise ValueError
+            values["experience"] = years.quantize(Decimal("0.1"))
+        except (InvalidOperation, ValueError):
+            row.notes.append("Years of experience is not a valid number; left empty.")
+
+    values["emergency_name"] = _text(record.get("emergency_name"))[:120] or None
+    emergency = _text(record.get("emergency_number"))
+    values["emergency_number"] = None
+    if emergency:
+        try:
+            values["emergency_number"] = v.clean_indian_mobile(emergency)
+        except ValueError:
+            row.notes.append("Emergency contact number is not a valid Indian mobile; left empty.")
+
+    values["degree"] = _text(record.get("degree"))[:120] or None
+    values["university"] = _text(record.get("university"))[:150] or None
+    values["college"] = _text(record.get("college"))[:150] or None
+    if not values["university"]:
+        row.notes.append("University is missing.")
+    if not values["college"]:
+        row.notes.append("College name is missing.")
+    values["percentage"] = None
+    percentage = _text(record.get("percentage")).rstrip("%").strip()
+    if percentage:
+        try:
+            marks = Decimal(percentage)
+            if marks < 0 or marks > 100:
+                raise ValueError
+            values["percentage"] = marks.quantize(Decimal("0.01"))
+        except (InvalidOperation, ValueError):
+            row.notes.append("Percentage is not valid; left empty.")
+    values["year_of_passing"] = None
+    year = _text(record.get("year_of_passing"))
+    if year:
+        if year.isdigit() and 1950 <= int(year) <= date.today().year:
+            values["year_of_passing"] = int(year)
+        else:
+            row.notes.append("Year of passing is not valid; left empty.")
+
+
 def parse_employee_sheet(data: bytes) -> list[ParsedRow]:
     parsed: list[ParsedRow] = []
     for number, record in _read_sheet(data):
@@ -203,6 +294,8 @@ def parse_employee_sheet(data: bytes) -> list[ParsedRow]:
                 row.notes.append(
                     f"{key.capitalize()} was longer than {limit} characters; shortened."
                 )
+
+        _read_onboarding_details(record, row)
 
         pan = _text(record.get("pan"))
         values["pan"] = None

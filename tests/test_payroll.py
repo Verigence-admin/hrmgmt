@@ -513,3 +513,25 @@ def test_a_person_without_an_employee_record_has_no_payslips(team, world):
     stranger = str(uuid.uuid4())
     r = team.call("get", "/payslips", stranger)
     assert r.status_code in (403, 404)
+
+
+# ---- salary status on the employee record -----------------------------------------------------
+
+
+def test_employee_record_shows_salary_status_and_pending_details(team):
+    eid, _ = team.employee()
+
+    def record():
+        return team.call("get", f"/employees/{eid}", team.hr).json()
+
+    assert record()["salaryStatus"] == "NONE" and "SALARY" in record()["missingDetails"]
+    team.salary(eid, "30000", approve=False)
+    assert record()["salaryStatus"] == "WAITING_FINANCE"
+    assert "SALARY" not in record()["missingDetails"]
+    other, _ = team.employee()
+    team.salary(other, "30000")
+    approved = team.call("get", f"/employees/{other}", team.hr).json()
+    assert approved["salaryStatus"] == "APPROVED"
+    code = approved["employeeCode"]
+    listed = team.call("get", f"/employees?q={code}", team.hr).json()["items"]
+    assert [e["salaryStatus"] for e in listed] == ["APPROVED"]

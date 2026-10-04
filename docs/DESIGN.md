@@ -250,3 +250,15 @@ Data rules: PAN is not unique in the database. A missing PAN, a duplicate PAN, a
 - **CEO only.** `hr.payroll.approve` is held only through the CEO role. Security excludes this one permission from SuperAdmin's blanket access, so SuperAdmin cannot approve a payroll run unless SuperAdmin has also been given the CEO role. Every other HR permission is allowed to SuperAdmin without assigning a role.
 - **Onboarding creates the login.** Creating an employee also creates the Verigence user (no OTP step). That user starts Pending, appears under Users → Pending Approvals, ticks "Is employee", and can sign in once SuperAdmin allows it. Someone who registered on their own is linked from the employee screen by email, which also ticks "Is employee".
 - **HR roles are granted by SuperAdmin only**, from the Users screen.
+
+## 25. Guided onboarding details
+
+An employee carries state, district, pincode, years of experience, an emergency contact, and
+qualifications with university, college and year of passing. District, university and college are
+required in practice but a record can be saved without them: `missingDetails` on the employee
+lists what is still empty (STATE, DISTRICT, PINCODE, EMERGENCY_CONTACT, EXPERIENCE, QUALIFICATION,
+UNIVERSITY_COLLEGE, SALARY). It is worked out from the data on every read, so it clears itself.
+`salaryStatus` is NONE, WAITING_FINANCE, APPROVED or APPROVED_FROM_LATER, from `hr.salary_structure`.
+Salary can be attached after onboarding with `POST /hr/v1/payroll/structures`. The spreadsheet
+import reads the same columns; a qualification is saved only when the degree is in the catalogue
+and percentage and year are given, otherwise the row is noted.
