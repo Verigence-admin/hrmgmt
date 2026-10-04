@@ -191,6 +191,43 @@ def test_people_are_listed_alphabetically_whatever_their_codes(world):
     assert names == sorted(names, key=str.lower)
 
 
+def test_team_month_shows_working_days_holidays_leave_and_absence(world, migrated_engine):
+    admin, keeper = _hr(world)
+    world.grant(admin, perm.HR_SETTINGS_MANAGE)
+    emp, user = _person(world, admin)
+    world.assign(user, "PC", outlet=OUTLET)
+    declared = world.client.put(
+        "/hr/v1/holidays/2026-10-20",
+        json={"name": "Vijaya Dasami", "status": "DECLARED"},
+        headers=world.headers(admin),
+    )
+    assert declared.status_code == 200
+    for day in (5, 6, 11):  # two working days and one Sunday
+        world.clock.set(ist(2026, 10, day, 10, 20))
+        assert send(world, user, "in", token(world, user)).status_code == 200
+    with migrated_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO hr.leave_request (employee_id, leave_type, from_date, to_date, days,"
+                " status, approver_rule) VALUES (CAST(:e AS uuid), 'SICK', '2026-10-07',"
+                " '2026-10-07', 1, 'APPROVED', 'HR')"
+            ),
+            {"e": emp["employeeId"]},
+        )
+    world.clock.set(ist(2026, 10, 21, 10, 20))
+    body = world.client.get(
+        "/hr/v1/attendance/team", params={"month": "2026-10"}, headers=world.headers(keeper)
+    ).json()
+    assert body["summary"]["sundays"] == 4
+    assert body["summary"]["holidays"] == [{"date": "2026-10-20", "name": "Vijaya Dasami"}]
+    assert body["summary"]["workingDays"] == 26 and body["summary"]["workingDaysSoFar"] == 17
+    mine = [e for e in body["employees"] if e["employeeCode"] == emp["employeeCode"]][0]
+    assert mine["daysPresent"] == 2 and mine["offDayWorked"] == 1 and mine["daysOnLeave"] == 1
+    # 16 working days have passed before today (21st); 2 present, 1 on leave
+    assert mine["daysAbsent"] == 13
+    assert mine["pendingExceptions"] == 1  # the Sunday
+
+
 def test_a_person_on_two_projects_appears_once_for_each_and_can_be_filtered(world):
     admin, keeper = _hr(world)
     emp, user = _person(world, admin)

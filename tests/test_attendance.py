@@ -167,16 +167,27 @@ def test_location_must_be_fresh_and_accurate(world):
     assert send(world, user, "in", tok).status_code == 200  # nothing above used the token
 
 
-def test_sunday_and_declared_holidays_are_not_working_days_but_tentative_ones_are(world):
+def test_a_sunday_or_declared_holiday_can_be_worked_but_needs_approval_and_a_tentative_one_is_normal(
+    world,
+):
     _, user, hr = setup_pc(world)
     world.clock.set(ist(2026, 10, 4, 10, 20))  # Sunday
+    sunday = send(world, user, "in", token(world, user))
+    assert sunday.status_code == 200, sunday.text
     assert (
-        send(world, user, "in", token(world, user)).json()["code"] == "ATTENDANCE_NOT_A_WORKING_DAY"
+        sunday.json()["needsApproval"] == ["OFF_DAY_WORK"] and "OFF_DAY" in sunday.json()["flags"]
     )
+    today = world.client.get("/hr/v1/attendance/today", headers=world.headers(user)).json()
+    assert today["dayKind"] == "SUNDAY" and today["day"]["status"] == "PENDING_APPROVAL"
+    # checking out the same day adds no second approval, and being early means nothing on a day off
+    world.clock.set(ist(2026, 10, 4, 13, 0))
+    out = send(world, user, "out", token(world, user, "CHECK_OUT"))
+    assert out.status_code == 200 and out.json()["needsApproval"] == []
     world.clock.set(ist(2026, 10, 19, 10, 20))  # Mahanavami, tentative in the calendar
     today = world.client.get("/hr/v1/attendance/today", headers=world.headers(user)).json()
     assert today["dayKind"] == "WORKING" and today["tentativeHoliday"] == "Mahanavami"
-    assert send(world, user, "in", token(world, user)).status_code == 200
+    normal = send(world, user, "in", token(world, user))
+    assert normal.status_code == 200 and normal.json()["needsApproval"] == []
     world.grant(hr, perm.HR_SETTINGS_MANAGE)
     r = world.client.put(
         "/hr/v1/holidays/2026-10-20",
@@ -185,9 +196,29 @@ def test_sunday_and_declared_holidays_are_not_working_days_but_tentative_ones_ar
     )
     assert r.status_code == 200
     world.clock.set(ist(2026, 10, 20, 10, 20))
-    assert (
-        send(world, user, "in", token(world, user)).json()["code"] == "ATTENDANCE_NOT_A_WORKING_DAY"
+    holiday = send(world, user, "in", token(world, user))
+    assert holiday.status_code == 200 and holiday.json()["needsApproval"] == ["OFF_DAY_WORK"]
+
+
+def test_off_day_work_is_decided_by_the_team_lead_or_hr(world):
+    hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
+    _, pc_user = world.employee(hr)
+    world.assign(pc_user, "PC", outlet=OUTLET)
+    _, tl_user = world.employee(hr)
+    world.assign(tl_user, "TL")
+    keeper = world.grant(str(uuid.uuid4()), perm.HR_ATTENDANCE_READ_ALL)
+    world.clock.set(ist(2026, 10, 4, 10, 20))  # Sunday
+    assert send(world, pc_user, "in", token(world, pc_user)).status_code == 200
+    xid = exception_for(world, pc_user)
+    listed = world.client.get("/hr/v1/approvals/attendance", headers=world.headers(tl_user)).json()
+    assert [i["exceptionId"] for i in listed["items"]] == [xid]
+    assert listed["items"][0]["kind"] == "OFF_DAY_WORK"
+    done = world.client.post(
+        f"/hr/v1/approvals/attendance/{xid}/decision",
+        json={"decision": "APPROVE"},
+        headers=world.headers(keeper),
     )
+    assert done.status_code == 200 and done.json()["status"] == "APPROVED"
 
 
 def test_check_in_once_check_out_after_and_early_check_out_is_an_exception(world):

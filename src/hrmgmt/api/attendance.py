@@ -200,11 +200,9 @@ def _record_event(
     work_date = ist_date(now)
     values = cfg.load_all(conn)
 
-    kind, holiday = day_kind(conn, work_date)
-    if kind == "SUNDAY":
-        raise conflict("ATTENDANCE_NOT_A_WORKING_DAY", "Sunday is the weekly off.")
-    if kind == "HOLIDAY":
-        raise conflict("ATTENDANCE_NOT_A_WORKING_DAY", f"Today is a holiday ({holiday}).")
+    # A Sunday or a declared holiday is a day off, but attendance can still be marked: it goes for
+    # approval (below) instead of being refused.
+    off_day = day_kind(conn, work_date)[0] in ("SUNDAY", "HOLIDAY")
 
     if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
         raise ApiError(422, "ATTENDANCE_LOCATION_INVALID", "The location is not valid.")
@@ -259,6 +257,13 @@ def _record_event(
         employee_roles=roles,
         assignments=assignments,
     )
+    if off_day:
+        # Being late or early means nothing on a day off; working on it needs approval instead.
+        kinds[:] = [k for k in kinds if k not in ("LATE_CHECK_IN", "EARLY_CHECK_OUT")]
+        flags[:] = [f for f in flags if f not in ("LATE", "EARLY")]
+        if event == "CHECK_IN":
+            kinds.append("OFF_DAY_WORK")
+            flags.append("OFF_DAY")
     if "OUT_OF_FENCE" in kinds and not (reason and reason.strip()):
         # The token is not used up: the person adds a reason and sends the same photo again.
         raise ApiError(
@@ -677,6 +682,33 @@ def _days(conn: Connection, employee_id: str, first: date, nxt: date) -> list[di
     return [_day_view(r, exc[str(r["attendance_id"])]) for r in rows]
 
 
+def _month_days(first: date, nxt: date) -> list[date]:
+    out, day = [], first
+    while day < nxt:
+        out.append(day)
+        day += timedelta(days=1)
+    return out
+
+
+def _leave_by_person(conn: Connection, first: date, nxt: date) -> dict[str, dict[date, float]]:
+    """Approved leave, person by person and day by day (a half day is 0.5)."""
+    out: dict[str, dict[date, float]] = {}
+    rows = conn.execute(
+        text(
+            "SELECT employee_id, from_date, to_date, half_day FROM hr.leave_request"
+            " WHERE status = 'APPROVED' AND from_date < :b AND to_date >= :a"
+        ),
+        {"a": first, "b": nxt},
+    )
+    for employee_id, start, finish, half in rows:
+        days = out.setdefault(str(employee_id), {})
+        day = max(start, first)
+        while day <= min(finish, nxt - timedelta(days=1)):
+            days[day] = 0.5 if half else 1.0
+            day += timedelta(days=1)
+    return out
+
+
 @router.get("/attendance/team")
 def team_attendance(
     month: Annotated[str | None, Query(max_length=7)] = None,
@@ -684,40 +716,88 @@ def team_attendance(
     clock: Clock = Depends(get_clock),
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    """HR and the CEO: every active employee's days in the month, with worked-day counts."""
-    first, nxt = _month_bounds(month, ist_date(clock()))
-    rows = conn.execute(
+    """HR and the CEO: the month at a glance. The month's working days and holidays, and for every
+    active employee the days present, on leave and absent, work on a day off, and what waits for approval."""
+    today = ist_date(clock())
+    first, nxt = _month_bounds(month, today)
+    holidays = {
+        r[0]: str(r[1])
+        for r in conn.execute(
+            text(
+                "SELECT holiday_date, name FROM hr.holiday WHERE status = 'DECLARED'"
+                " AND holiday_date >= :a AND holiday_date < :b ORDER BY holiday_date"
+            ),
+            {"a": first, "b": nxt},
+        )
+    }
+    days = _month_days(first, nxt)
+    off = {d for d in days if is_sunday(d) or d in holidays}
+    working = [d for d in days if d not in off]
+    working_set = set(working)
+    present: dict[str, set[date]] = {}
+    for employee_id, work_date in conn.execute(
         text(
-            """
-            SELECT e.employee_id, e.employee_code, e.full_name,
-                   count(a.attendance_id) FILTER (WHERE a.check_in_at IS NOT NULL) AS days_in,
-                   count(a.attendance_id) FILTER (WHERE a.check_out_at IS NOT NULL) AS days_out,
-                   (SELECT count(*) FROM hr.attendance_exception x
-                     WHERE x.employee_id = e.employee_id AND x.status = 'PENDING'
-                       AND x.work_date >= :a AND x.work_date < :b) AS pending
-            FROM hr.employee e
-            LEFT JOIN hr.attendance_day a ON a.employee_id = e.employee_id
-                  AND a.work_date >= :a AND a.work_date < :b
-            WHERE e.employment_status = 'ACTIVE'
-            GROUP BY e.employee_id, e.employee_code, e.full_name
-            ORDER BY lower(e.full_name), e.employee_code
-            """
+            "SELECT employee_id, work_date FROM hr.attendance_day"
+            " WHERE check_in_at IS NOT NULL AND work_date >= :a AND work_date < :b"
+        ),
+        {"a": first, "b": nxt},
+    ):
+        present.setdefault(str(employee_id), set()).add(work_date)
+    leave = _leave_by_person(conn, first, nxt)
+    people = conn.execute(
+        text(
+            "SELECT e.employee_id, e.employee_code, e.full_name, e.date_of_joining,"
+            " (SELECT count(*) FROM hr.attendance_exception x"
+            "   WHERE x.employee_id = e.employee_id AND x.status = 'PENDING'"
+            "     AND x.work_date >= :a AND x.work_date < :b) AS pending"
+            " FROM hr.employee e WHERE e.employment_status = 'ACTIVE'"
+            " ORDER BY lower(e.full_name), e.employee_code"
         ),
         {"a": first, "b": nxt},
     ).mappings()
-    return {
-        "month": first.strftime("%Y-%m"),
-        "employees": [
+    employees = []
+    for r in people:
+        eid = str(r["employee_id"])
+        here = present.get(eid, set())
+        mine = leave.get(eid, {})
+        joined = r["date_of_joining"]
+        counted = [d for d in working if d < today and (joined is None or d >= joined)]
+        absent = sum(1 - mine.get(d, 0.0) for d in counted if d not in here)
+        employees.append(
             {
-                "employeeId": str(r["employee_id"]),
+                "employeeId": eid,
                 "employeeCode": r["employee_code"],
                 "fullName": r["full_name"],
-                "daysCheckedIn": r["days_in"],
-                "daysCheckedOut": r["days_out"],
+                "daysPresent": sum(1 for d in working if d in here),
+                "offDayWorked": sum(1 for d in off if d in here),
+                "daysOnLeave": sum(v for d, v in mine.items() if d in working_set and d <= today),
+                "daysAbsent": absent,
+                "daysCheckedIn": len(here),
+                "daysCheckedOut": 0,
                 "pendingExceptions": r["pending"],
             }
-            for r in rows
-        ],
+        )
+    out_counts = conn.execute(
+        text(
+            "SELECT employee_id, count(*) FROM hr.attendance_day WHERE check_out_at IS NOT NULL"
+            " AND work_date >= :a AND work_date < :b GROUP BY employee_id"
+        ),
+        {"a": first, "b": nxt},
+    )
+    by_out = {str(e): int(n) for e, n in out_counts}
+    for item in employees:
+        item["daysCheckedOut"] = by_out.get(item["employeeId"], 0)
+    return {
+        "month": first.strftime("%Y-%m"),
+        "summary": {
+            "workingDays": len(working),
+            "workingDaysSoFar": sum(1 for d in working if d <= today),
+            "sundays": sum(1 for d in days if is_sunday(d)),
+            "holidays": [
+                {"date": d.isoformat(), "name": name} for d, name in sorted(holidays.items())
+            ],
+        },
+        "employees": employees,
     }
 
 

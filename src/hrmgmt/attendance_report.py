@@ -25,6 +25,7 @@ DELINQUENCY_LABELS = {
     "OUT_OF_FENCE": "Not in tagged location",
     "NO_OUTLET_LOCATION": "No outlet location on file",
     "NO_FACE": "No face found in the photo",
+    "OFF_DAY_WORK": "Worked on an off day",
 }
 _NO_PROJECT = {"projectCode": None, "projectName": None, "roles": [], "outlets": []}
 
