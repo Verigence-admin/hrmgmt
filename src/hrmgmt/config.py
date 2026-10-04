@@ -99,7 +99,10 @@ def load_settings() -> Settings:
         db_pool_size=_int("HR_DB_POOL_SIZE", 5, 1, 20),
         db_max_overflow=_int("HR_DB_MAX_OVERFLOW", 5, 0, 20),
         audit_core_base_url=os.environ.get("AUDIT_CORE_BASE_URL", "").strip(),
-        google_maps_api_key=os.environ.get("GOOGLE_MAPS_API_KEY", "").strip(),
+        google_maps_api_key=(
+            os.environ.get("HR_GOOGLE_MAPS_API_KEY", "")
+            or os.environ.get("GOOGLE_MAPS_API_KEY", "")
+        ).strip(),
     )
 
 
