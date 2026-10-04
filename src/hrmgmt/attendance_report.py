@@ -45,6 +45,9 @@ class Row:
     check_out_outlet: str | None = None
     check_in_distance_m: float | None = None
     check_out_distance_m: float | None = None
+    attendance_id: str | None = None
+    has_check_in_photo: bool = False
+    has_check_out_photo: bool = False
     delinquencies: list[dict[str, Any]] = field(default_factory=list)
 
     @property
@@ -98,12 +101,14 @@ def build_rows(
     exceptions: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in conn.execute(
         text(
-            "SELECT attendance_id, kind, status FROM hr.attendance_exception"
+            "SELECT attendance_id, kind, status, reason FROM hr.attendance_exception"
             " WHERE work_date >= :a AND work_date <= :b ORDER BY created_at"
         ),
         params,
     ).mappings():
-        exceptions[str(r["attendance_id"])].append({"kind": r["kind"], "status": r["status"]})
+        exceptions[str(r["attendance_id"])].append(
+            {"kind": r["kind"], "status": r["status"], "reason": r["reason"]}
+        )
     leave = [
         (str(r["employee_id"]), r["from_date"], r["to_date"])
         for r in conn.execute(
@@ -210,6 +215,9 @@ def _row(
         else:
             row.status = "NOT_CHECKED_IN"
         return row
+    row.attendance_id = str(record["attendance_id"])
+    row.has_check_in_photo = bool(record["check_in_photo_key"])
+    row.has_check_out_photo = bool(record["check_out_photo_key"])
     row.check_in_at = record["check_in_at"]
     row.check_out_at = record["check_out_at"]
     row.check_in_outlet = record["check_in_outlet_name"]
@@ -218,7 +226,15 @@ def _row(
         value = record[f"check_{side}_distance_m"]
         setattr(row, f"check_{side}_distance_m", float(value) if value is not None else None)
     found = exceptions.get(str(record["attendance_id"]), [])
-    row.delinquencies.extend({"code": e["kind"], "status": e["status"]} for e in found)
+    row.delinquencies.extend(
+        {"code": e["kind"], "status": e["status"], "reason": e["reason"]} for e in found
+    )
+    flagged = {*(record["check_in_flags"] or []), *(record["check_out_flags"] or [])}
+    if "NO_OUTLET_LOCATION" in flagged and not any(
+        e["kind"] == "NO_OUTLET_LOCATION" for e in found
+    ):
+        # The outlet has no position on file: HR's to fix, nobody's to approve.
+        row.delinquencies.append({"code": "NO_OUTLET_LOCATION", "status": None, "reason": None})
     if record["check_out_at"] is None and past:
         row.delinquencies.append({"code": "MISSING_CHECK_OUT", "status": None})
     if any(e["status"] == "PENDING" for e in found):
@@ -250,11 +266,15 @@ def row_view(row: Row) -> dict[str, Any]:
         "checkInDistanceM": row.check_in_distance_m,
         "checkOutDistanceM": row.check_out_distance_m,
         "hoursWorked": row.hours,
+        "attendanceId": row.attendance_id,
+        "hasCheckInPhoto": row.has_check_in_photo,
+        "hasCheckOutPhoto": row.has_check_out_photo,
         "delinquencies": [
             {
                 "code": d["code"],
                 "label": DELINQUENCY_LABELS[d["code"]],
                 "decision": d["status"],
+                "reason": d.get("reason"),
             }
             for d in row.delinquencies
         ],

@@ -164,7 +164,7 @@ def attendance_report(
             ]
         )
     late = book.create_sheet("Delinquencies")
-    late.append(["Date", "Employee ID", "Name", "Project", "Delinquency", "Decision"])
+    late.append(["Date", "Employee ID", "Name", "Project", "Delinquency", "Decision", "Reason"])
     for r in rows:
         for d in r.delinquencies:
             late.append(
@@ -175,6 +175,7 @@ def attendance_report(
                     _text(r.project_name or "No project"),
                     DELINQUENCY_LABELS[d["code"]],
                     d["status"].title() if d["status"] else "",
+                    _text(d.get("reason")),
                 ]
             )
     for ws in (sheet, late):

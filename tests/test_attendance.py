@@ -127,12 +127,13 @@ def test_outside_the_fence_needs_a_reason_and_the_same_token_still_works(world):
     assert today["day"]["status"] == "PENDING_APPROVAL"
 
 
-def test_pc_without_an_outlet_location_goes_to_an_exception(world):
+def test_pc_without_an_outlet_location_checks_in_with_no_reason_and_no_approval(world):
     _, user, _ = setup_pc(world, with_outlet=False)
-    tok = token(world, user)
-    assert send(world, user, "in", tok).json()["code"] == "ATTENDANCE_REASON_REQUIRED"
-    r = send(world, user, "in", tok, reason="No outlet is set for me yet")
-    assert r.status_code == 200 and r.json()["needsApproval"] == ["NO_OUTLET_LOCATION"]
+    r = send(world, user, "in", token(world, user))
+    assert r.status_code == 200 and r.json()["needsApproval"] == []
+    assert "NO_OUTLET_LOCATION" in r.json()["flags"]
+    today = world.client.get("/hr/v1/attendance/today", headers=world.headers(user)).json()
+    assert today["day"]["exceptions"] == []
 
 
 def test_team_lead_is_not_geofenced_and_late_arrival_is_an_exception(world):
@@ -583,36 +584,24 @@ def test_an_outlet_without_a_location_does_not_stop_the_others_from_working(worl
     assert r.json()["outletName"] == "Cuttack Motors"
 
 
-def test_a_missing_outlet_location_is_decided_by_hr_even_when_a_team_lead_exists(world):
+def test_a_missing_outlet_location_needs_no_approval_and_is_shown_to_hr(world):
     hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
-    _, pc_user = world.employee(hr)
+    pc, pc_user = world.employee(hr)
     world.assign(pc_user, "PC", outlet=("No Location Outlet", None, None))
     _, tl_user = world.employee(hr)
     world.assign(tl_user, "TL")
     keeper = world.grant(str(uuid.uuid4()), perm.HR_ATTENDANCE_READ_ALL)
-    r = send(world, pc_user, "in", token(world, pc_user), reason="Outlet has no pin yet")
-    assert r.status_code == 200 and r.json()["needsApproval"] == ["NO_OUTLET_LOCATION"]
-    xid = exception_for(world, pc_user)
-    listed = world.client.get("/hr/v1/approvals/attendance", headers=world.headers(keeper))
-    assert [i["exceptionId"] for i in listed.json()["items"]] == [xid]
-    assert (
-        world.client.get("/hr/v1/approvals/attendance", headers=world.headers(tl_user)).json()[
-            "items"
-        ]
-        == []
-    )
-    refused = world.client.post(
-        f"/hr/v1/approvals/attendance/{xid}/decision",
-        json={"decision": "APPROVE"},
-        headers=world.headers(tl_user),
-    )
-    assert refused.status_code == 404
-    done = world.client.post(
-        f"/hr/v1/approvals/attendance/{xid}/decision",
-        json={"decision": "APPROVE"},
-        headers=world.headers(keeper),
-    )
-    assert done.status_code == 200 and done.json()["status"] == "APPROVED"
+    r = send(world, pc_user, "in", token(world, pc_user))
+    assert r.status_code == 200 and r.json()["needsApproval"] == []
+    for who in (keeper, tl_user):
+        listed = world.client.get("/hr/v1/approvals/attendance", headers=world.headers(who))
+        assert listed.json()["items"] == []
+    daily = world.client.get(
+        "/hr/v1/attendance/daily", params={"date": "2026-10-05"}, headers=world.headers(keeper)
+    ).json()
+    mine = [x for x in daily["rows"] if x["employeeCode"] == pc["employeeCode"]]
+    assert [d["code"] for d in mine[0]["delinquencies"]] == ["NO_OUTLET_LOCATION"]
+    assert mine[0]["status"] == "CHECKED_IN"
 
 
 def test_every_employee_needs_a_location_even_with_no_project(world):

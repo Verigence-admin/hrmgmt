@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import time
 from datetime import date, datetime, timedelta
 from typing import Annotated, Any, Literal
 
@@ -148,7 +149,8 @@ def _exceptions_needed(
             o for o in outlets if o["latitude"] is not None and o["longitude"] is not None
         ]
         if not with_position:
-            kinds.append("NO_OUTLET_LOCATION")
+            # Missing outlet data is a system gap, not the person's fault: no reason, no approval.
+            # The flag on the record is what HR sees in the daily view.
             flags.append("NO_OUTLET_LOCATION")
         else:
             nearest = min(
@@ -191,6 +193,7 @@ def _record_event(
 ) -> dict[str, Any]:
     if storage is None:
         raise dependency_unavailable("Photo storage is not configured.")
+    started = time.perf_counter()
     employee_id = _own_employee_id(conn, user)
     now = clock()
     work_date = ist_date(now)
@@ -255,17 +258,12 @@ def _record_event(
         employee_roles=roles,
         assignments=assignments,
     )
-    needs_reason = [k for k in kinds if k in ("OUT_OF_FENCE", "NO_OUTLET_LOCATION")]
-    if needs_reason and not (reason and reason.strip()):
+    if "OUT_OF_FENCE" in kinds and not (reason and reason.strip()):
         # The token is not used up: the person adds a reason and sends the same photo again.
         raise ApiError(
             422,
             "ATTENDANCE_REASON_REQUIRED",
-            (
-                "You are not at your tagged location. Say why, and your Team Lead or Project Manager will review it."
-                if "OUT_OF_FENCE" in needs_reason
-                else "No outlet location is on file for you. Say why, and HR will review it."
-            ),
+            "You are not at your tagged location. Say why, and your Team Lead or Project Manager will review it.",
         )
 
     # The token: one use, for this person and this event, still within its window.
@@ -286,7 +284,9 @@ def _record_event(
     if taken is not None and abs(taken - to_ist(now).replace(tzinfo=None)) > _PHOTO_TIME_WINDOW:
         flags.append("PHOTO_TIME_MISMATCH")
 
+    checked = time.perf_counter()
     address = geocoder.address(latitude, longitude) if geocoder else None
+    geocoded = time.perf_counter()
     if address is None:
         flags.append("NO_ADDRESS")
     name_row = conn.execute(
@@ -304,6 +304,7 @@ def _record_event(
         address=address,
         event="Check-in" if event == "CHECK_IN" else "Check-out",
     )
+    stamped_at = time.perf_counter()
     key = (
         f"attendance/{work_date:%Y}/{work_date:%m}/{employee_id}/"
         f"{work_date.isoformat()}-{'in' if event == 'CHECK_IN' else 'out'}.jpg"
@@ -312,6 +313,7 @@ def _record_event(
         storage.put(key, stamped, "image/jpeg")
     except StorageError as exc:
         raise dependency_unavailable("The photo could not be saved. Please try again.") from exc
+    stored = time.perf_counter()
 
     prefix = "check_in" if event == "CHECK_IN" else "check_out"
     params = {
@@ -391,6 +393,18 @@ def _record_event(
             "distanceM": round(distance, 1) if distance is not None else None,
         },
         request=request,
+    )
+    # Where the time goes on a check-in or check-out: the checks, the address lookup, drawing on the
+    # photo, and storing it. Milliseconds only; nothing about the person.
+    logger.info(
+        "hr_attendance_timing",
+        side=event,
+        photo_kb=len(data) // 1024,
+        checks_ms=round((checked - started) * 1000),
+        address_ms=round((geocoded - checked) * 1000),
+        stamp_ms=round((stamped_at - geocoded) * 1000),
+        store_ms=round((stored - stamped_at) * 1000),
+        total_ms=round((time.perf_counter() - started) * 1000),
     )
     return {
         "attendanceId": attendance_id,

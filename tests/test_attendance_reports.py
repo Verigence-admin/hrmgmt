@@ -9,7 +9,7 @@ from openpyxl import load_workbook
 from sqlalchemy import text
 
 from hrmgmt import permissions as perm
-from tests.support import NEAR, OUTLET, World, ist
+from tests.support import FAR, NEAR, OUTLET, World, ist
 from tests.test_attendance import send, token
 
 SECOND = ("Bhubaneswar Motors", 20.2961, 85.8245)
@@ -99,6 +99,27 @@ def test_daily_view_shows_who_is_in_out_absent_or_on_leave_and_what_is_wrong(
         "/hr/v1/attendance/daily", params={"date": "2026-10-05"}, headers=world.headers(keeper)
     ).json()
     assert body["dayKind"] == "WORKING" and body["summary"]["absent"] >= 1
+
+
+def test_daily_view_carries_the_photo_flags_and_the_reason_for_being_away(world):
+    admin, keeper = _hr(world)
+    emp, user = _person(world, admin)
+    world.assign(user, "PC", outlet=OUTLET)
+    sent = send(
+        world, user, "in", token(world, user), where=FAR, reason="Visiting the other showroom"
+    )
+    assert sent.status_code == 200, sent.text
+    row = _rows(world, keeper, "2026-10-05")[emp["employeeCode"]][0]
+    assert row["attendanceId"] == sent.json()["attendanceId"]
+    assert row["hasCheckInPhoto"] is True and row["hasCheckOutPhoto"] is False
+    away = [d for d in row["delinquencies"] if d["code"] == "OUT_OF_FENCE"]
+    assert away and away[0]["reason"] == "Visiting the other showroom"
+    assert away[0]["label"] == "Not in tagged location"
+    # a day with no check-in has no photo and no attendance record
+    other, other_user = _person(world, admin)
+    world.assign(other_user, "PC", outlet=OUTLET)
+    quiet = _rows(world, keeper, "2026-10-05")[other["employeeCode"]][0]
+    assert quiet["attendanceId"] is None and quiet["hasCheckInPhoto"] is False
 
 
 def test_a_person_on_two_projects_appears_once_for_each_and_can_be_filtered(world):
