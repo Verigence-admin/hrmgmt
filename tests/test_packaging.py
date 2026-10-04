@@ -18,9 +18,20 @@ def test_requirements_match_pyproject_dependencies() -> None:
     assert declared == pinned
 
 
-def test_railway_config_runs_migrations_before_start_and_checks_health() -> None:
+def test_railway_config_builds_our_dockerfile_and_migrates_before_start() -> None:
+    """The service was inherited from the old attendance service, whose settings point at another
+    Dockerfile. The config file must name ours explicitly so those settings cannot win."""
     config = tomllib.loads((ROOT / "railway.toml").read_text())
+    assert config["build"]["builder"] == "DOCKERFILE"
+    assert config["build"]["dockerfilePath"] == "Dockerfile"
+    assert (ROOT / "Dockerfile").is_file()
     deploy = config["deploy"]
     assert "alembic upgrade head" in deploy["preDeployCommand"][0]
-    assert "hrmgmt.main:app_factory" in deploy["startCommand"]
     assert deploy["healthcheckPath"] == "/health"
+
+
+def test_dockerfile_starts_the_app_factory_and_ships_migrations() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    assert "hrmgmt.main:app_factory" in dockerfile and "--factory" in dockerfile
+    for needed in ("COPY migrations", "COPY src", "COPY alembic.ini", "requirements.txt"):
+        assert needed in dockerfile

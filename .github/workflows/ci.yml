@@ -42,3 +42,15 @@ jobs:
         run: mypy src
       - name: Tests (includes fresh-database migration tests)
         run: pytest -q
+
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the service image
+        run: docker build -t hrmgmt-ci .
+      - name: The image starts and the app imports
+        run: docker run --rm hrmgmt-ci python -c "import hrmgmt.main; print('hrmgmt imports')"
+      - name: The image carries the migrations
+        run: docker run --rm hrmgmt-ci sh -c "PYTHONPATH=src alembic heads"
