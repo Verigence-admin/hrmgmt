@@ -25,6 +25,11 @@ from hrmgmt.security import HumanPrincipal
 from hrmgmt.storage import ObjectStorage, StorageError
 
 logger = structlog.get_logger(__name__)
+LOGIN_NOTE = (
+    "Shown once. It is not stored. Share it securely. The login stays pending until SuperAdmin "
+    "allows it (Users, Pending Approvals); the employee can sign in only after that."
+)
+
 router = APIRouter(prefix="/hr/v1", tags=["Employees"])
 
 can_read = require_permission(perm.HR_EMPLOYEE_READ)
@@ -444,7 +449,7 @@ def create_employee_record(
     if initial_password is not None:
         # Shown once, to the HR user who created the employee, so it can be handed over.
         result["initialPassword"] = initial_password
-        result["initialPasswordNote"] = "Shown once. It is not stored. Share it securely."
+        result["initialPasswordNote"] = LOGIN_NOTE
     return result
 
 
@@ -479,7 +484,7 @@ def create_login(
     result: dict[str, Any] = {"employee": _view(_fetch(conn, employee_id))}
     if password is not None:
         result["initialPassword"] = password
-        result["initialPasswordNote"] = "Shown once. It is not stored. Share it securely."
+        result["initialPasswordNote"] = LOGIN_NOTE
     return result
 
 
@@ -522,14 +527,22 @@ def link_login(
         ) from exc
     if found is None:
         raise ApiError(404, "LOGIN_NOT_FOUND", "No Verigence user has this email.")
-    if found.status != "ACTIVE":
-        raise conflict("LOGIN_NOT_ACTIVE", "That Verigence user is not active.")
+    if found.status not in ("ACTIVE", "PENDING"):
+        raise conflict(
+            "LOGIN_NOT_ACTIVE", "That Verigence user is not active or waiting for approval."
+        )
     taken = conn.execute(
         text("SELECT 1 FROM hr.employee WHERE security_user_id = CAST(:u AS uuid)"),
         {"u": found.user_id},
     ).first()
     if taken:
         raise conflict("LOGIN_IN_USE", "That login is already linked to another employee.")
+    try:
+        provisioner.mark_employee(user_id=found.user_id)
+    except ProvisioningError as exc:
+        raise dependency_unavailable(
+            f"The login could not be marked as an employee ({exc.code}). Please try again."
+        ) from exc
     conn.execute(
         text(
             "UPDATE hr.employee SET security_user_id = CAST(:u AS uuid), login_status = 'CREATED',"

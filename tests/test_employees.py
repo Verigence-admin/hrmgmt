@@ -64,6 +64,9 @@ class FakeProvisioner:
     def find_user(self, *, email):
         return self.existing.get(email)
 
+    def mark_employee(self, *, user_id):
+        self.marked = getattr(self, "marked", []) + [user_id]
+
 
 def _settings() -> Settings:
     return Settings(
@@ -846,6 +849,7 @@ def test_link_an_existing_login_by_the_employee_email(make_client):
     fake.existing[emp["personalEmail"]] = FoundLogin(existing, "Link Person", "ACTIVE")
     r = _link(client, emp["employeeId"])
     assert r.status_code == 200 and r.json()["employee"]["loginStatus"] == "CREATED"
+    assert fake.marked == [existing]  # Security was told to tick "Is Employee"
     again = _link(client, emp["employeeId"])
     assert again.status_code == 409 and again.json()["code"] == "LOGIN_ALREADY_LINKED"
 
@@ -861,7 +865,7 @@ def test_link_refuses_unknown_inactive_and_already_used_logins(make_client):
     fake.existing["off@example.com"] = FoundLogin(str(uuid.uuid4()), None, "SUSPENDED")
     inactive = _link(client, first["employeeId"], {"email": "off@example.com"})
     assert inactive.status_code == 409 and inactive.json()["code"] == "LOGIN_NOT_ACTIVE"
-    shared = FoundLogin(str(uuid.uuid4()), "Shared", "ACTIVE")
+    shared = FoundLogin(str(uuid.uuid4()), "Shared", "PENDING")  # waiting for SuperAdmin
     fake.existing["shared@example.com"] = shared
     assert _link(client, first["employeeId"], {"email": "shared@example.com"}).status_code == 200
     taken = _link(client, second["employeeId"], {"email": "shared@example.com"})
@@ -885,4 +889,17 @@ def test_provisioner_lookup_maps_answers_and_never_retries():
         p, s = _provisioner(status)
         with pytest.raises(ProvisioningError):
             p.find_user(email="x@example.com")
+        assert len(s) == 1
+
+
+def test_provisioner_marks_an_employee_once_with_the_service_token():
+    prov, sent = _provisioner(200, {"userId": "u-9", "isEmployee": True})
+    prov.mark_employee(user_id="u-9")
+    assert len(sent) == 1 and sent[0].method == "POST"
+    assert sent[0].url.path == "/security/v1/service/users/u-9/employee"
+    assert sent[0].headers["authorization"] == "Bearer svc"
+    for status in (403, 404, 500):
+        p, s = _provisioner(status)
+        with pytest.raises(ProvisioningError):
+            p.mark_employee(user_id="u-9")
         assert len(s) == 1

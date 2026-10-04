@@ -37,6 +37,8 @@ class UserProvisioner(Protocol):
 
     def find_user(self, *, email: str) -> FoundLogin | None: ...
 
+    def mark_employee(self, *, user_id: str) -> None: ...
+
 
 class SecurityUserProvisioner:
     """Creates an ACTIVE Verigence user (identity-provider account with a verified email, no
@@ -134,3 +136,25 @@ class SecurityUserProvisioner:
         return FoundLogin(
             user_id=user_id, display_name=name if isinstance(name, str) else None, status=status
         )
+
+    def mark_employee(self, *, user_id: str) -> None:
+        """Ticks "Is Employee" on an existing Verigence user that was just linked to an employee."""
+        try:
+            token = self._token_provider()
+        except Exception as exc:
+            raise ProvisioningError("SECURITY_UNAVAILABLE", "Security is not reachable") from exc
+        try:
+            response = self._client.post(
+                f"/security/v1/service/users/{user_id}/employee",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("hr_mark_employee_failed", reason="endpoint_unavailable")
+            raise ProvisioningError("SECURITY_UNAVAILABLE", "Security is not reachable") from exc
+        if response.status_code in (401, 403):
+            raise ProvisioningError("NOT_PERMITTED", "HRMgmt is not allowed to update users")
+        if response.status_code != 200:
+            logger.warning("hr_mark_employee_failed", http_status=response.status_code)
+            raise ProvisioningError(
+                "SECURITY_UNAVAILABLE", f"Security answered HTTP {response.status_code}"
+            )

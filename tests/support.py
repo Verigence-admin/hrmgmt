@@ -51,6 +51,9 @@ class FakeProvisioner:
     def find_user(self, *, email):
         return self.existing.get(email)
 
+    def mark_employee(self, *, user_id):
+        self.marked = getattr(self, "marked", []) + [user_id]
+
 
 class FakeGeocoder:
     def __init__(self, address: str | None = "Station Road, Cuttack, Odisha 753001, India"):
