@@ -193,3 +193,31 @@ def test_refresh_endpoint_needs_settings_permission_and_is_spaced(migrated_engin
     assert too_soon.status_code == 409 and too_soon.json()["code"] == "WORK_CONTEXT_TOO_SOON"
     status = world.client.get("/hr/v1/work-context/status", headers=world.headers(hr)).json()
     assert status["lastStatus"] == "OK" and status["assignmentsSeen"] == 1
+
+
+def test_app_factory_starts_and_stops_the_daily_sync(migrated_engine, monkeypatch):
+    """The container starts through app_factory. With Audit Core configured it must come up and
+    shut down cleanly: this path crashed the service on DEV once and nothing else exercised it."""
+    from fastapi.testclient import TestClient
+
+    from hrmgmt import main as hr_main
+    from hrmgmt import workcontext as wc
+    from tests.support import settings
+
+    started: list[str] = []
+    monkeypatch.setattr(wc.DailySync, "start", lambda self: started.append("start"))
+    monkeypatch.setattr(wc.DailySync, "stop", lambda self: started.append("stop"))
+    monkeypatch.setattr(hr_main, "get_settings", lambda: settings())
+    monkeypatch.setattr(hr_main, "get_engine", lambda: migrated_engine)
+    real_create = hr_main.create_app
+
+    def create_with_client():
+        app = real_create(settings())
+        app.state.workcontext = object()
+        return app
+
+    monkeypatch.setattr(hr_main, "create_app", create_with_client)
+    app = hr_main.app_factory()
+    with TestClient(app) as client:
+        assert client.get("/health").json()["service"] == "hrmgmt"
+    assert started == ["start", "stop"]

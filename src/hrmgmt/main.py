@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -123,6 +126,14 @@ def app_factory() -> FastAPI:
     if app.state.workcontext is not None:
         # Once a day, in the background: HR requests never wait on Audit Core.
         daily = DailySync(get_engine(), app.state.workcontext)
-        app.add_event_handler("startup", daily.start)
-        app.add_event_handler("shutdown", daily.stop)
+
+        @asynccontextmanager
+        async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+            daily.start()
+            try:
+                yield
+            finally:
+                daily.stop()
+
+        app.router.lifespan_context = lifespan
     return app
