@@ -313,3 +313,7 @@ ESI wage, and a salary with no ESI wage has no ESI line at all. PF is optional f
 or more: the salary carries `pf_applicable` (default true); false is accepted only at ₹25,000 or
 more, and then the payslip has no PF line. Changing it means proposing a new salary, which Finance
 approves like any other.
+
+Every employee's department was cleared when the fixed list was introduced (one audit entry,
+`DEPARTMENTS_CLEARED`, records how many). Only HR and above (`hr.employee.manage`) can set it; an
+employee sees their own department but any attempt to send one on the self-service route is refused.
