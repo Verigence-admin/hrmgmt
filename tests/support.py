@@ -14,7 +14,7 @@ from sqlalchemy import text
 from hrmgmt import permissions as perm
 from hrmgmt.config import Settings
 from hrmgmt.main import create_app
-from hrmgmt.provisioning import CreatedLogin, FoundLogin, ProvisioningError
+from hrmgmt.provisioning import CreatedLogin, FoundLogin, ProvisioningError, SyncOutcome
 from hrmgmt.storage import StorageError
 from tests.test_api import FakeAuthorizer, FakeValidator
 
@@ -61,6 +61,25 @@ class FakeProvisioner:
         if q:
             users = [u for u in users if q.lower() in (u.display_name or "").lower()]
         return users[offset : offset + limit]
+
+    def sync_employees(self, *, items):
+        import dataclasses
+
+        self.synced = getattr(self, "synced", []) + [list(items)]
+        users = {u.user_id: u for u in getattr(self, "users", [])}
+        out = []
+        for uid, suspend in items:
+            u = users.get(uid)
+            if u is None:
+                out.append(SyncOutcome(uid, False, None, False, False, "NOT_FOUND"))
+                continue
+            do_suspend = suspend and u.status == "ACTIVE"
+            note = None if (do_suspend or not suspend) else "NOT_ACTIVE"
+            status = "SUSPENDED" if do_suspend else u.status
+            out.append(SyncOutcome(uid, True, status, not u.is_employee, do_suspend, note))
+            users[uid] = dataclasses.replace(u, status=status, is_employee=True)
+        self.users = list(users.values())
+        return out
 
     def set_password(self, *, user_id, password):
         self.passwords = getattr(self, "passwords", []) + [(user_id, password)]

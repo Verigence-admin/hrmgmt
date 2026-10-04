@@ -39,6 +39,16 @@ class UserSummary:
     is_employee: bool
 
 
+@dataclass(frozen=True)
+class SyncOutcome:
+    user_id: str
+    found: bool
+    status: str | None
+    ticked: bool
+    suspended: bool
+    note: str | None
+
+
 class UserProvisioner(Protocol):
     def create_user(
         self, *, first_name: str, last_name: str, email: str, mobile: str, password: str
@@ -256,6 +266,47 @@ class SecurityUserProvisioner:
                     is_employee=bool(r.get("isEmployee")),
                 )
                 for r in rows
+            ]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ProvisioningError(
+                "BAD_RESPONSE", "Security returned an unexpected answer"
+            ) from exc
+
+    def sync_employees(self, *, items: list[tuple[str, bool]]) -> list[SyncOutcome]:
+        """Tells Security which users are employees (user id, suspend?). Security ticks Is Employee
+        and suspends an ACTIVE user when asked; it never reactivates. One attempt, up to 100 users."""
+        try:
+            token = self._token_provider()
+        except Exception as exc:
+            raise ProvisioningError("SECURITY_UNAVAILABLE", "Security is not reachable") from exc
+        try:
+            response = self._client.post(
+                "/security/v1/service/users/employee-sync",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"items": [{"userId": uid, "suspend": suspend} for uid, suspend in items]},
+                timeout=60.0,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("hr_employee_sync_failed", reason="endpoint_unavailable")
+            raise ProvisioningError("SECURITY_UNAVAILABLE", "Security is not reachable") from exc
+        if response.status_code in (401, 403):
+            raise ProvisioningError("NOT_PERMITTED", "HRMgmt is not allowed to sync users")
+        if response.status_code != 200:
+            logger.warning("hr_employee_sync_failed", http_status=response.status_code)
+            raise ProvisioningError(
+                "SECURITY_UNAVAILABLE", f"Security answered HTTP {response.status_code}"
+            )
+        try:
+            return [
+                SyncOutcome(
+                    user_id=str(r["userId"]),
+                    found=bool(r["found"]),
+                    status=r.get("status"),
+                    ticked=bool(r["ticked"]),
+                    suspended=bool(r["suspended"]),
+                    note=r.get("note"),
+                )
+                for r in response.json()
             ]
         except (ValueError, KeyError, TypeError) as exc:
             raise ProvisioningError(
