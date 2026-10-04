@@ -24,6 +24,8 @@ HR_PAYROLL_PREPARE = "hr.payroll.prepare"
 HR_PAYROLL_APPROVE = "hr.payroll.approve"
 # Feedback & Support tickets. No HR role holds it: only SuperAdmin passes it, through Security.
 HR_SUPPORT_MANAGE = "hr.support.manage"
+# Clearing old attendance, leave and reimbursement records. Like support, only SuperAdmin passes it.
+HR_HOUSEKEEPING_MANAGE = "hr.housekeeping.manage"
 
 # Shown to the UI by GET /hr/v1/me so it can choose navigation. The server still re-checks
 # every protected request; the UI list is a convenience, never the authority.
@@ -43,4 +45,5 @@ ALL_PERMISSIONS: tuple[str, ...] = (
     HR_PAYROLL_PREPARE,
     HR_PAYROLL_APPROVE,
     HR_SUPPORT_MANAGE,
+    HR_HOUSEKEEPING_MANAGE,
 )

@@ -40,6 +40,11 @@ class FakeStorage:
             raise StorageError("down")
         return self.objects[key][0]
 
+    def delete(self, key):
+        if self.fail:
+            raise StorageError("down")
+        self.objects.pop(key, None)
+
 
 class FakeProvisioner:
     def __init__(self):

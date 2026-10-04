@@ -16,6 +16,8 @@ class ObjectStorage(Protocol):
 
     def get(self, key: str) -> bytes: ...
 
+    def delete(self, key: str) -> None: ...
+
 
 class S3Storage:
     """The existing S3-compatible bucket, used only under the `hr/` prefix. Nothing here is
@@ -77,3 +79,12 @@ class S3Storage:
         except (BotoCoreError, ClientError) as exc:
             logger.warning("hr_storage_get_failed", error_type=type(exc).__name__)
             raise StorageError("could not read the file") from exc
+
+    def delete(self, key: str) -> None:
+        from botocore.exceptions import BotoCoreError, ClientError
+
+        try:
+            self._client.delete_object(Bucket=self._bucket, Key=self._full_key(key))
+        except (BotoCoreError, ClientError) as exc:
+            logger.warning("hr_storage_delete_failed", error_type=type(exc).__name__)
+            raise StorageError("could not remove the file") from exc
