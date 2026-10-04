@@ -702,7 +702,9 @@ def _run_view(conn: Connection, row: Any, with_lines: bool = True) -> dict[str, 
     }
     if with_lines:
         lines = conn.execute(
-            text("SELECT * FROM hr.payroll_line WHERE run_id = :r ORDER BY lower(employee_name), employee_code"),
+            text(
+                "SELECT * FROM hr.payroll_line WHERE run_id = :r ORDER BY lower(employee_name), employee_code"
+            ),
             {"r": row["run_id"]},
         ).mappings()
         out["lines"] = [_line_summary(r) for r in lines]
