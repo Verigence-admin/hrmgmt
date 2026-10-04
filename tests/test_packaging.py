@@ -35,3 +35,11 @@ def test_dockerfile_starts_the_app_factory_and_ships_migrations() -> None:
     assert "hrmgmt.main:app_factory" in dockerfile and "--factory" in dockerfile
     for needed in ("COPY migrations", "COPY src", "COPY alembic.ini", "requirements.txt"):
         assert needed in dockerfile
+
+
+def test_stopgap_dockerfile_mirrors_the_real_one() -> None:
+    """Dockerfile.attendance exists only because the Railway service still points at that name."""
+    real = (ROOT / "Dockerfile").read_text()
+    stopgap = (ROOT / "Dockerfile.attendance").read_text()
+    body = "\n".join(line for line in stopgap.splitlines() if not line.startswith("#")) + "\n"
+    assert body == real
