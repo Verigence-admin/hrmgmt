@@ -32,10 +32,16 @@ def decides_attendance(
     employee_id: str,
     at: datetime,
     kind: str | None = None,
+    *,
+    hr_override: bool = False,
 ) -> bool:
+    """`hr_override` lets HR decide any person's exception (never their own), for when HR opens a
+    person's day and acts on it; the approvals lists never pass it."""
     employee_user = wc.employee_user_id(conn, employee_id)
     if employee_user is not None and employee_user == actor.user_id:
         return False
+    if hr_override and has_permission(authorizer, actor, perm.HR_ATTENDANCE_READ_ALL):
+        return True
     if kind == "NO_OUTLET_LOCATION":
         # The fault is missing outlet data, not the person's whereabouts, so a Team Lead cannot
         # judge it: HR decides (and the CEO).

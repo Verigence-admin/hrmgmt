@@ -896,7 +896,9 @@ def decide_attendance_exception(
     if row is None:
         raise not_found("Request not found.")
     employee_id = str(row["employee_id"])
-    if not decides_attendance(conn, authorizer, user, employee_id, clock(), row["kind"]):
+    if not decides_attendance(
+        conn, authorizer, user, employee_id, clock(), row["kind"], hr_override=True
+    ):
         raise not_found("Request not found.")  # not shown to anyone who may not decide it
     if row["status"] != "PENDING":
         raise conflict("APPROVAL_ALREADY_DECIDED", "This request has already been decided.")

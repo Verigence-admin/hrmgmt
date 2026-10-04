@@ -122,6 +122,57 @@ def test_daily_view_carries_the_photo_flags_and_the_reason_for_being_away(world)
     assert quiet["attendanceId"] is None and quiet["hasCheckInPhoto"] is False
 
 
+def test_hr_can_decide_a_day_from_the_daily_view_but_the_lists_stay_with_the_approvers(
+    world, migrated_engine
+):
+    admin, keeper = _hr(world)
+    emp, user = _person(world, admin)
+    world.assign(user, "PC", outlet=OUTLET)
+    _, tl_user = _person(world, admin)
+    world.assign(tl_user, "TL")
+    send(world, user, "in", token(world, user), where=FAR, reason="Other showroom")
+    with migrated_engine.connect() as conn:
+        xid = str(
+            conn.execute(text("SELECT exception_id FROM hr.attendance_exception")).scalar_one()
+        )
+    # HR's own approvals list still holds only what HR is the approver for
+    listed = world.client.get("/hr/v1/approvals/attendance", headers=world.headers(keeper))
+    assert listed.json()["items"] == []
+    # ...but HR, acting on the person's day, can decide it
+    done = world.client.post(
+        f"/hr/v1/approvals/attendance/{xid}/decision",
+        json={"decision": "APPROVE"},
+        headers=world.headers(keeper),
+    )
+    assert done.status_code == 200 and done.json()["status"] == "APPROVED"
+    # someone without the HR attendance permission still cannot
+    stranger = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_READ)
+    refused = world.client.post(
+        f"/hr/v1/approvals/attendance/{xid}/decision",
+        json={"decision": "APPROVE"},
+        headers=world.headers(stranger),
+    )
+    assert refused.status_code == 404
+
+
+def test_hr_cannot_decide_their_own_exception(world, migrated_engine):
+    admin, keeper = _hr(world)
+    emp, user = _person(world, admin)
+    world.assign(user, "PC", outlet=OUTLET)
+    world.grant(user, perm.HR_ATTENDANCE_READ_ALL)
+    send(world, user, "in", token(world, user), where=FAR, reason="Other showroom")
+    with migrated_engine.connect() as conn:
+        xid = str(
+            conn.execute(text("SELECT exception_id FROM hr.attendance_exception")).scalar_one()
+        )
+    own = world.client.post(
+        f"/hr/v1/approvals/attendance/{xid}/decision",
+        json={"decision": "APPROVE"},
+        headers=world.headers(user),
+    )
+    assert own.status_code == 404
+
+
 def test_a_person_on_two_projects_appears_once_for_each_and_can_be_filtered(world):
     admin, keeper = _hr(world)
     emp, user = _person(world, admin)
