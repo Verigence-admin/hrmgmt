@@ -287,3 +287,14 @@ be changed only by HR.
   working day unless the person worked.
 - **Who works on what** (`GET /hr/v1/work-assignments`): each employee's projects, roles and
   outlets, from the copy of Audit Core's assignments (changed in Audit Core, refreshed daily).
+
+## 29. Designation and salary import
+
+`POST /hr/v1/employees/designation-salary-import/preview` and `/commit` read an Excel sheet with
+Employee ID, Designation and Salary (Monthly) (Date of Joining optional). The preview saves nothing;
+commit applies at most 10 rows per call. It needs both `hr.employee.manage` and `hr.salary.propose`.
+A designation is set to the listed one; a salary is only *proposed* (effective from the date of
+joining, else today), through the same code as a hand-entered proposal, so Finance still approves it.
+A gross from 21,001 to 25,000 has no template and is left for HR to add on the employee's page. Rows
+that already have a matching proposed or approved salary, or the same designation, change nothing, so
+the sheet can be run again. Salary amounts never go in the audit log.

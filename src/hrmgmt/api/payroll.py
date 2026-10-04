@@ -235,6 +235,14 @@ def propose_structure(
     user: HumanPrincipal = Depends(can_propose),
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
+    return create_structure(conn, body, user, request)
+
+
+def create_structure(
+    conn: Connection, body: StructureIn, user: HumanPrincipal, request: Request
+) -> dict[str, Any]:
+    """Proposes a salary structure. Shared by the single proposal and the bulk import, so both
+    apply the same template and band rules."""
     eid = _uuid(body.employee_id)
     if (
         conn.execute(
