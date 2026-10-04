@@ -339,16 +339,17 @@ def _create_login(
     return None
 
 
-@router.post("/employees", status_code=201)
-def create_employee(
+def create_employee_record(
+    conn: Connection,
+    *,
     body: EmployeeCreate,
+    actor: str,
+    provisioner: UserProvisioner | None,
     request: Request,
-    user: HumanPrincipal = Depends(can_manage),
-    provisioner: UserProvisioner | None = Depends(get_provisioner),
-    conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    """Create the employee record and, by default, their Verigence login. A login problem never
-    loses the employee: the record is kept and HR sees why the login is pending."""
+    """Create one employee and, when asked, their Verigence login. A login problem never loses
+    the employee: the record is kept and HR sees why the login is pending. Shared by the single
+    "Add employee" call and the spreadsheet import so both behave identically."""
     try:
         employee_id = str(
             conn.execute(
@@ -382,7 +383,7 @@ def create_employee(
                     "ec_number": body.emergency_contact_number,
                     "ec_addr": v.clean_text(body.emergency_contact_address),
                     "doj": body.date_of_joining,
-                    "actor": user.user_id,
+                    "actor": actor,
                 },
             ).scalar_one()
         )
@@ -396,11 +397,11 @@ def create_employee(
                     "id": employee_id,
                     "pan": body.pan,
                     "aadhaar": body.aadhaar,
-                    "actor": user.user_id,
+                    "actor": actor,
                 },
             )
         for q in body.qualifications:
-            _insert_qualification(conn, employee_id, q, user.user_id)
+            _insert_qualification(conn, employee_id, q, actor)
     except UnknownDegree as exc:
         conn.rollback()
         raise conflict("DEGREE_UNKNOWN", "Choose a degree from the list.") from exc
@@ -416,7 +417,7 @@ def create_employee(
         raise
     record_audit(
         conn,
-        actor_user_id=user.user_id,
+        actor_user_id=actor,
         action="EMPLOYEE_CREATED",
         entity_type="employee",
         entity_id=employee_id,
@@ -435,7 +436,7 @@ def create_employee(
         initial_password = _create_login(
             conn,
             employee_id=employee_id,
-            actor=user.user_id,
+            actor=actor,
             provisioner=provisioner,
             request=request,
         )
@@ -445,6 +446,19 @@ def create_employee(
         result["initialPassword"] = initial_password
         result["initialPasswordNote"] = "Shown once. It is not stored. Share it securely."
     return result
+
+
+@router.post("/employees", status_code=201)
+def create_employee(
+    body: EmployeeCreate,
+    request: Request,
+    user: HumanPrincipal = Depends(can_manage),
+    provisioner: UserProvisioner | None = Depends(get_provisioner),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    return create_employee_record(
+        conn, body=body, actor=user.user_id, provisioner=provisioner, request=request
+    )
 
 
 @router.post("/employees/{employee_id}/login")

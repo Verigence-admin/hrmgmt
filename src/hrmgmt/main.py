@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from hrmgmt.api.employee_import import router as employee_import_router
 from hrmgmt.api.employees import router as employees_router
 from hrmgmt.api.meta import router as meta_router
 from hrmgmt.authz import SecurityAuthorizer
@@ -71,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.warning("hr_file_storage_not_configured")
 
     app.include_router(meta_router)
+    app.include_router(employee_import_router)
     app.include_router(employees_router)
 
     @app.get("/health")
