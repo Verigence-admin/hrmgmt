@@ -572,6 +572,7 @@ def test_employee_sees_only_their_own_approved_salary(team):
     team.salary(eid2, "30000")
     seen = team.call("get", "/me/salary", user2).json()["current"]
     assert seen["grossMonthly"] == 30000.0 and seen["effectiveFrom"] == "2026-01-01"
+    assert seen["pfApplicable"] is True
     assert sum(Decimal(c["amount"]) for c in seen["components"]) == Decimal("30000")
     assert team.call("get", "/me/salary", other_user).json()["current"]["grossMonthly"] == 50000.0
 

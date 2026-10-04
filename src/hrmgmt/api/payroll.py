@@ -1288,6 +1288,7 @@ def my_salary(
             "grossMonthly": float(current["gross_monthly"]),
             "components": current["components"],
             "effectiveFrom": current["effective_from"].isoformat(),
+            "pfApplicable": bool(current["pf_applicable"]),
         }
     return {
         "current": view,
