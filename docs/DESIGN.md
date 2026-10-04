@@ -262,3 +262,13 @@ UNIVERSITY_COLLEGE, SALARY). It is worked out from the data on every read, so it
 Salary can be attached after onboarding with `POST /hr/v1/payroll/structures`. The spreadsheet
 import reads the same columns; a qualification is saved only when the degree is in the catalogue
 and percentage and year are given, otherwise the row is noted.
+
+## 26. Who sees salary, and employee self-service
+
+Salary is proposed only by HRAdmin, CEO and SuperAdmin (`hr.salary.propose`); FinanceAdmin and CEO
+approve. Anyone without an HR role, a Team Lead or Project Manager included, has no payroll or
+salary permission and is refused every payroll route. An employee reads only their own approved
+salary (`GET /hr/v1/me/salary`, a proposal still waiting is not shown) and their own payslips.
+An employee can update their address, state, district, pincode, emergency contact and their own
+qualifications (`/me/employee/qualifications`). The login email (`personal_email`) and mobile can
+be changed only by HR.

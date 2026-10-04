@@ -1170,6 +1170,42 @@ def my_payslips(
     }
 
 
+@router.get("/me/salary")
+def my_salary(
+    user: HumanPrincipal = Depends(current_user),
+    conn: Connection = Depends(get_conn),
+    clock: Clock = Depends(get_clock),
+) -> dict[str, Any]:
+    """A person's own approved salary, and nobody else's: the employee is found from the login.
+    A proposal still waiting for approval is not shown to the employee."""
+    employee_id = _own_employee_id(conn, user)
+    today = ist_date(clock())
+    rows = (
+        conn.execute(
+            text(
+                "SELECT * FROM hr.salary_structure WHERE employee_id = CAST(:e AS uuid)"
+                " AND status = 'APPROVED' ORDER BY effective_from DESC, proposed_at DESC"
+            ),
+            {"e": employee_id},
+        )
+        .mappings()
+        .all()
+    )
+    current = next((r for r in rows if r["effective_from"] <= today), None)
+    upcoming = [r for r in rows if r["effective_from"] > today]
+    view = None
+    if current is not None:
+        view = {
+            "grossMonthly": float(current["gross_monthly"]),
+            "components": current["components"],
+            "effectiveFrom": current["effective_from"].isoformat(),
+        }
+    return {
+        "current": view,
+        "upcomingFrom": upcoming[-1]["effective_from"].isoformat() if upcoming else None,
+    }
+
+
 @router.get("/payroll/runs/{run_id}/payslips")
 def run_payslips(
     run_id: str, _: HumanPrincipal = Depends(can_read), conn: Connection = Depends(get_conn)

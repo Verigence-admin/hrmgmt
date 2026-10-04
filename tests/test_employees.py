@@ -724,6 +724,59 @@ def test_employee_edits_own_state_pincode_and_emergency_address_but_not_qualific
             headers=auth(me),
         ).status_code
         == 403
+    )  # the HR route stays closed to an employee; their own routes are /me/employee/qualifications
+
+
+def test_employee_manages_own_qualifications_but_cannot_change_email(make_client, migrated_engine):
+    client, _ = make_client()
+    emp, me = _linked_employee(client, migrated_engine)
+    q = {
+        "degree_code": "BCOM",
+        "percentage": 70,
+        "year_of_passing": 2020,
+        "university": "Utkal University",
+        "college": "Ravenshaw College",
+    }
+    r = client.post("/hr/v1/me/employee/qualifications", json=q, headers=auth(me))
+    assert r.status_code == 201
+    quals = r.json()["qualifications"]
+    assert quals[0]["university"] == "Utkal University"
+    qid = quals[0]["qualificationId"]
+    r = client.put(
+        f"/hr/v1/me/employee/qualifications/{qid}",
+        json={**q, "percentage": 75},
+        headers=auth(me),
+    )
+    assert r.status_code == 200 and r.json()["qualifications"][0]["percentage"] == 75.0
+    # a bad degree and an id that is not theirs are refused
+    bad = client.post(
+        "/hr/v1/me/employee/qualifications", json={**q, "degree_code": "NOPE"}, headers=auth(me)
+    )
+    assert bad.status_code == 409
+    other, other_user = _linked_employee(client, migrated_engine)
+    other_q = client.post(
+        "/hr/v1/me/employee/qualifications", json=q, headers=auth(other_user)
+    ).json()["qualifications"][0]["qualificationId"]
+    assert (
+        client.put(
+            f"/hr/v1/me/employee/qualifications/{other_q}", json=q, headers=auth(me)
+        ).status_code
+        == 404
+    )
+    assert (
+        client.delete(f"/hr/v1/me/employee/qualifications/{other_q}", headers=auth(me)).status_code
+        == 404
+    )
+    assert (
+        client.delete(f"/hr/v1/me/employee/qualifications/{qid}", headers=auth(me)).status_code
+        == 200
+    )
+    # the login email cannot be changed by the employee
+    for body in ({"personal_email": "new@example.com"}, {"mobile": "9000000000"}):
+        assert client.patch("/hr/v1/me/employee", json=body, headers=auth(me)).status_code == 422
+    assert (
+        client.get("/hr/v1/me/employee", headers=auth(me)).json()["personalEmail"]
+        == emp["personalEmail"]
     )
 
 

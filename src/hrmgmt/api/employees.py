@@ -860,7 +860,16 @@ def add_qualification(
     user: HumanPrincipal = Depends(can_manage),
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    employee_id = _uuid(employee_id)
+    return _add_qualification(conn, _uuid(employee_id), body, user, request)
+
+
+def _add_qualification(
+    conn: Connection,
+    employee_id: str,
+    body: QualificationIn,
+    user: HumanPrincipal,
+    request: Request,
+) -> dict[str, Any]:
     _fetch(conn, employee_id)
     try:
         qid = _insert_qualification(conn, employee_id, body, user.user_id)
@@ -892,7 +901,19 @@ def replace_qualification(
     user: HumanPrincipal = Depends(can_manage),
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    employee_id, qualification_id = _uuid(employee_id), _uuid(qualification_id)
+    return _replace_qualification(
+        conn, _uuid(employee_id), _uuid(qualification_id), body, user, request
+    )
+
+
+def _replace_qualification(
+    conn: Connection,
+    employee_id: str,
+    qualification_id: str,
+    body: QualificationIn,
+    user: HumanPrincipal,
+    request: Request,
+) -> dict[str, Any]:
     if (
         conn.execute(
             text("SELECT 1 FROM hr.degree WHERE code = :c AND active"),
@@ -949,7 +970,16 @@ def delete_qualification(
     user: HumanPrincipal = Depends(can_manage),
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    employee_id, qualification_id = _uuid(employee_id), _uuid(qualification_id)
+    return _remove_qualification(conn, _uuid(employee_id), _uuid(qualification_id), user, request)
+
+
+def _remove_qualification(
+    conn: Connection,
+    employee_id: str,
+    qualification_id: str,
+    user: HumanPrincipal,
+    request: Request,
+) -> dict[str, Any]:
     removed = conn.execute(
         text(
             "DELETE FROM hr.employee_qualification"
@@ -1162,6 +1192,45 @@ def update_my_record(
         request=request,
     )
     return _view(_fetch(conn, employee_id))
+
+
+# An employee keeps their own qualifications up to date. The employee is found from the login,
+# so the id of someone else can never be reached through these three.
+
+
+@router.post("/me/employee/qualifications", status_code=201)
+def add_my_qualification(
+    body: QualificationIn,
+    request: Request,
+    user: HumanPrincipal = Depends(current_user),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    return _add_qualification(conn, _own_employee_id(conn, user), body, user, request)
+
+
+@router.put("/me/employee/qualifications/{qualification_id}")
+def replace_my_qualification(
+    qualification_id: str,
+    body: QualificationIn,
+    request: Request,
+    user: HumanPrincipal = Depends(current_user),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    return _replace_qualification(
+        conn, _own_employee_id(conn, user), _uuid(qualification_id), body, user, request
+    )
+
+
+@router.delete("/me/employee/qualifications/{qualification_id}")
+def delete_my_qualification(
+    qualification_id: str,
+    request: Request,
+    user: HumanPrincipal = Depends(current_user),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    return _remove_qualification(
+        conn, _own_employee_id(conn, user), _uuid(qualification_id), user, request
+    )
 
 
 @router.get("/me/employee/sensitive")

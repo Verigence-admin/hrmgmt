@@ -535,3 +535,33 @@ def test_employee_record_shows_salary_status_and_pending_details(team):
     code = approved["employeeCode"]
     listed = team.call("get", f"/employees?q={code}", team.hr).json()["items"]
     assert [e["salaryStatus"] for e in listed] == ["APPROVED"]
+
+
+# ---- who can see salary ----------------------------------------------------------------------
+
+
+def test_employee_sees_only_their_own_approved_salary(team):
+    eid, user = team.employee()
+    other, other_user = team.employee()
+    team.salary(other, "50000")
+    mine = team.call("get", "/me/salary", user).json()
+    assert mine["current"] is None  # nothing approved for this person yet
+    team.salary(eid, "30000", approve=False)
+    assert team.call("get", "/me/salary", user).json()["current"] is None  # proposals stay hidden
+    eid2, user2 = team.employee()
+    team.salary(eid2, "30000")
+    seen = team.call("get", "/me/salary", user2).json()["current"]
+    assert seen["grossMonthly"] == 30000.0 and seen["effectiveFrom"] == "2026-01-01"
+    assert sum(Decimal(c["amount"]) for c in seen["components"]) == Decimal("30000")
+    assert team.call("get", "/me/salary", other_user).json()["current"]["grossMonthly"] == 50000.0
+
+
+def test_a_person_with_no_hr_role_such_as_a_team_lead_cannot_read_anyones_salary(team):
+    eid, _ = team.employee()
+    team.salary(eid, "30000")
+    lead = team.w.grant(str(uuid.uuid4()))  # no HR permission at all
+    for path in ("/payroll/structures", "/payroll/templates", "/payroll/runs"):
+        assert team.call("get", path, lead).status_code == 403, path
+    body = {"employee_id": eid, "gross_monthly": "40000", "effective_from": "2026-02-01"}
+    assert team.call("post", "/payroll/structures", lead, json=body).status_code == 403
+    assert team.call("get", "/me/salary", lead).status_code == 404  # no employee record: no salary
