@@ -25,9 +25,7 @@ def test_railway_config_builds_our_dockerfile_and_migrates_before_start() -> Non
     assert config["build"]["builder"] == "DOCKERFILE"
     assert config["build"]["dockerfilePath"] == "Dockerfile"
     assert (ROOT / "Dockerfile").is_file()
-    deploy = config["deploy"]
-    assert "alembic upgrade head" in deploy["preDeployCommand"][0]
-    assert deploy["healthcheckPath"] == "/health"
+    assert config["deploy"]["healthcheckPath"] == "/health"
 
 
 def test_dockerfile_starts_the_app_factory_and_ships_migrations() -> None:
@@ -35,6 +33,8 @@ def test_dockerfile_starts_the_app_factory_and_ships_migrations() -> None:
     assert "hrmgmt.main:app_factory" in dockerfile and "--factory" in dockerfile
     for needed in ("COPY migrations", "COPY src", "COPY alembic.ini", "requirements.txt"):
         assert needed in dockerfile
+    # the container migrates itself before serving, whatever the platform settings say
+    assert dockerfile.index("alembic upgrade head") < dockerfile.index("uvicorn")
 
 
 def _code_lines(text: str) -> list[str]:
