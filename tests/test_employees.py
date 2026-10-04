@@ -67,6 +67,14 @@ class FakeProvisioner:
     def mark_employee(self, *, user_id):
         self.marked = getattr(self, "marked", []) + [user_id]
 
+    def list_users(self, *, q=None, ids=None, limit=100, offset=0):
+        users = list(getattr(self, "users", []))
+        if ids:
+            users = [u for u in users if u.user_id in ids]
+        if q:
+            users = [u for u in users if q.lower() in (u.display_name or "").lower()]
+        return users[offset : offset + limit]
+
     def set_password(self, *, user_id, password):
         self.passwords = getattr(self, "passwords", []) + [(user_id, password)]
         if getattr(self, "set_password_error", None):

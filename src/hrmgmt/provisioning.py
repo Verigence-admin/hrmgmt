@@ -30,6 +30,15 @@ class FoundLogin:
     status: str
 
 
+@dataclass(frozen=True)
+class UserSummary:
+    user_id: str
+    display_name: str | None
+    email: str | None
+    status: str
+    is_employee: bool
+
+
 class UserProvisioner(Protocol):
     def create_user(
         self, *, first_name: str, last_name: str, email: str, mobile: str, password: str
@@ -40,6 +49,15 @@ class UserProvisioner(Protocol):
     def mark_employee(self, *, user_id: str) -> None: ...
 
     def set_password(self, *, user_id: str, password: str) -> str | None: ...
+
+    def list_users(
+        self,
+        *,
+        q: str | None = None,
+        ids: list[str] | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[UserSummary]: ...
 
 
 class SecurityUserProvisioner:
@@ -192,3 +210,54 @@ class SecurityUserProvisioner:
         if status in (401, 403):
             raise ProvisioningError("NOT_PERMITTED", "HRMgmt is not allowed to set passwords")
         raise ProvisioningError("SECURITY_UNAVAILABLE", f"Security answered HTTP {status}")
+
+    def list_users(
+        self,
+        *,
+        q: str | None = None,
+        ids: list[str] | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[UserSummary]:
+        """Verigence users (id, name, email, status, Is Employee), by search or by id. One attempt."""
+        try:
+            token = self._token_provider()
+        except Exception as exc:
+            raise ProvisioningError("SECURITY_UNAVAILABLE", "Security is not reachable") from exc
+        params: dict[str, str | int] = {"limit": limit, "offset": offset}
+        if q:
+            params["q"] = q
+        if ids:
+            params["ids"] = ",".join(ids)
+        try:
+            response = self._client.get(
+                "/security/v1/service/users",
+                headers={"Authorization": f"Bearer {token}"},
+                params=params,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("hr_list_users_failed", reason="endpoint_unavailable")
+            raise ProvisioningError("SECURITY_UNAVAILABLE", "Security is not reachable") from exc
+        if response.status_code in (401, 403):
+            raise ProvisioningError("NOT_PERMITTED", "HRMgmt is not allowed to list users")
+        if response.status_code != 200:
+            logger.warning("hr_list_users_failed", http_status=response.status_code)
+            raise ProvisioningError(
+                "SECURITY_UNAVAILABLE", f"Security answered HTTP {response.status_code}"
+            )
+        try:
+            rows = response.json()
+            return [
+                UserSummary(
+                    user_id=str(r["userId"]),
+                    display_name=r.get("displayName"),
+                    email=r.get("primaryEmail"),
+                    status=str(r["status"]),
+                    is_employee=bool(r.get("isEmployee")),
+                )
+                for r in rows
+            ]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ProvisioningError(
+                "BAD_RESPONSE", "Security returned an unexpected answer"
+            ) from exc
