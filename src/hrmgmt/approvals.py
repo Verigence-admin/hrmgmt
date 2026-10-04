@@ -31,10 +31,17 @@ def decides_attendance(
     actor: HumanPrincipal,
     employee_id: str,
     at: datetime,
+    kind: str | None = None,
 ) -> bool:
     employee_user = wc.employee_user_id(conn, employee_id)
     if employee_user is not None and employee_user == actor.user_id:
         return False
+    if kind == "NO_OUTLET_LOCATION":
+        # The fault is missing outlet data, not the person's whereabouts, so a Team Lead cannot
+        # judge it: HR decides (and the CEO).
+        return is_ceo(authorizer, actor.user_id) or has_permission(
+            authorizer, actor, perm.HR_ATTENDANCE_READ_ALL
+        )
     approvers = wc.project_approvers(conn, employee_id, at, ("TL", "PM"))
     if actor.user_id in approvers:
         return True

@@ -581,3 +581,35 @@ def test_an_outlet_without_a_location_does_not_stop_the_others_from_working(worl
     r = send(world, user, "in", token(world, user), where=NEAR)
     assert r.status_code == 200 and r.json()["needsApproval"] == []
     assert r.json()["outletName"] == "Cuttack Motors"
+
+
+def test_a_missing_outlet_location_is_decided_by_hr_even_when_a_team_lead_exists(world):
+    hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
+    _, pc_user = world.employee(hr)
+    world.assign(pc_user, "PC", outlet=("No Location Outlet", None, None))
+    _, tl_user = world.employee(hr)
+    world.assign(tl_user, "TL")
+    keeper = world.grant(str(uuid.uuid4()), perm.HR_ATTENDANCE_READ_ALL)
+    r = send(world, pc_user, "in", token(world, pc_user), reason="Outlet has no pin yet")
+    assert r.status_code == 200 and r.json()["needsApproval"] == ["NO_OUTLET_LOCATION"]
+    xid = exception_for(world, pc_user)
+    listed = world.client.get("/hr/v1/approvals/attendance", headers=world.headers(keeper))
+    assert [i["exceptionId"] for i in listed.json()["items"]] == [xid]
+    assert (
+        world.client.get("/hr/v1/approvals/attendance", headers=world.headers(tl_user)).json()[
+            "items"
+        ]
+        == []
+    )
+    refused = world.client.post(
+        f"/hr/v1/approvals/attendance/{xid}/decision",
+        json={"decision": "APPROVE"},
+        headers=world.headers(tl_user),
+    )
+    assert refused.status_code == 404
+    done = world.client.post(
+        f"/hr/v1/approvals/attendance/{xid}/decision",
+        json={"decision": "APPROVE"},
+        headers=world.headers(keeper),
+    )
+    assert done.status_code == 200 and done.json()["status"] == "APPROVED"

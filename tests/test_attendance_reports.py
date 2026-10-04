@@ -1,0 +1,215 @@
+from __future__ import annotations
+
+import io
+import uuid
+
+import pytest
+from openpyxl import load_workbook
+from sqlalchemy import text
+
+from hrmgmt import permissions as perm
+from tests.support import NEAR, OUTLET, World, ist
+from tests.test_attendance import send, token
+
+SECOND = ("Bhubaneswar Motors", 20.2961, 85.8245)
+
+
+@pytest.fixture()
+def world(migrated_engine):
+    w = World(migrated_engine)
+    w.clean_assignments()
+    with migrated_engine.begin() as conn:
+        for table in (
+            "attendance_exception",
+            "attendance_day",
+            "capture_token",
+        ):
+            conn.execute(text(f"DELETE FROM hr.{table}"))
+        conn.execute(text("DELETE FROM hr.leave_request"))
+        conn.execute(text("DELETE FROM hr.holiday WHERE status = 'DECLARED'"))
+        conn.execute(text("DELETE FROM hr.setting"))
+    return w
+
+
+def _hr(world: World) -> tuple[str, str]:
+    admin = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
+    keeper = world.grant(str(uuid.uuid4()), perm.HR_ATTENDANCE_READ_ALL, perm.HR_EMPLOYEE_READ)
+    return admin, keeper
+
+
+def _person(world: World, admin: str, **assign):
+    emp, user = world.employee(admin, date_of_joining="2026-01-05")
+    return emp, user
+
+
+def _rows(world: World, keeper: str, day: str, **params) -> dict[str, list[dict]]:
+    r = world.client.get(
+        "/hr/v1/attendance/daily", params={"date": day, **params}, headers=world.headers(keeper)
+    )
+    assert r.status_code == 200, r.text
+    out: dict[str, list[dict]] = {}
+    for row in r.json()["rows"]:
+        out.setdefault(row["employeeCode"], []).append(row)
+    return out
+
+
+def test_daily_view_shows_who_is_in_out_absent_or_on_leave_and_what_is_wrong(
+    world, migrated_engine
+):
+    admin, keeper = _hr(world)
+    done, done_user = _person(world, admin)
+    open_day, open_user = _person(world, admin)
+    absent, absent_user = _person(world, admin)
+    away, away_user = _person(world, admin)
+    for u in (done_user, open_user, absent_user, away_user):
+        world.assign(u, "PC", outlet=OUTLET)
+    with migrated_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO hr.leave_request (employee_id, leave_type, from_date, to_date, days,"
+                " status, approver_rule) VALUES (CAST(:e AS uuid), 'SICK', '2026-10-05',"
+                " '2026-10-05', 1, 'APPROVED', 'HR')"
+            ),
+            {"e": away["employeeId"]},
+        )
+    send(world, done_user, "in", token(world, done_user), where=NEAR)
+    world.clock.set(ist(2026, 10, 5, 18, 30))
+    send(world, done_user, "out", token(world, done_user, "CHECK_OUT"), where=NEAR)
+    world.clock.set(ist(2026, 10, 5, 10, 25))
+    send(world, open_user, "in", token(world, open_user), where=NEAR)
+
+    # the same day: still in progress, nobody is delinquent yet
+    today = _rows(world, keeper, "2026-10-05")
+    assert today[done["employeeCode"]][0]["status"] == "COMPLETE"
+    assert today[done["employeeCode"]][0]["hoursWorked"] > 7
+    assert today[open_day["employeeCode"]][0]["status"] == "CHECKED_IN"
+    assert today[absent["employeeCode"]][0]["status"] == "NOT_CHECKED_IN"
+    assert today[away["employeeCode"]][0]["status"] == "ON_LEAVE"
+    assert today[absent["employeeCode"]][0]["delinquencies"] == []
+
+    # the next day, that day is past: missing check-out and absence are now delinquencies
+    world.clock.set(ist(2026, 10, 6, 11, 0))
+    past = _rows(world, keeper, "2026-10-05")
+    codes = {k: [d["code"] for d in v[0]["delinquencies"]] for k, v in past.items()}
+    assert codes[open_day["employeeCode"]] == ["MISSING_CHECK_OUT"]
+    assert codes[absent["employeeCode"]] == ["ABSENT"]
+    assert codes[done["employeeCode"]] == [] and codes[away["employeeCode"]] == []
+    body = world.client.get(
+        "/hr/v1/attendance/daily", params={"date": "2026-10-05"}, headers=world.headers(keeper)
+    ).json()
+    assert body["dayKind"] == "WORKING" and body["summary"]["absent"] >= 1
+
+
+def test_a_person_on_two_projects_appears_once_for_each_and_can_be_filtered(world):
+    admin, keeper = _hr(world)
+    emp, user = _person(world, admin)
+    world.assign(user, "PC", outlet=OUTLET, project=("P1", "Project One"))
+    world.assign(user, "PC", outlet=SECOND, tenant="tenant-b", project=("P2", "Project Two"))
+    rows = _rows(world, keeper, "2026-10-05")[emp["employeeCode"]]
+    assert sorted(r["projectName"] for r in rows) == ["Project One", "Project Two"]
+    only = _rows(world, keeper, "2026-10-05", projectCode="P2")
+    assert [r["projectName"] for r in only[emp["employeeCode"]]] == ["Project Two"]
+
+
+def test_sunday_and_declared_holiday_are_not_working_days(world):
+    admin, keeper = _hr(world)
+    emp, user = _person(world, admin)
+    world.assign(user, "PC", outlet=OUTLET)
+    world.clock.set(ist(2026, 10, 12, 11, 0))
+    assert emp["employeeCode"] not in _rows(world, keeper, "2026-10-11")  # a Sunday
+    r = world.client.get(
+        "/hr/v1/attendance/daily", params={"date": "2026-10-11"}, headers=world.headers(keeper)
+    )
+    assert r.json()["dayKind"] == "SUNDAY"
+
+
+def test_the_report_is_an_excel_file_with_every_row_and_the_delinquencies(world, migrated_engine):
+    admin, keeper = _hr(world)
+    emp, user = _person(world, admin)
+    world.assign(user, "PC", outlet=OUTLET)
+    send(world, user, "in", token(world, user), where=NEAR)
+    world.clock.set(ist(2026, 10, 6, 11, 0))
+    r = world.client.get(
+        "/hr/v1/attendance/report",
+        params={"from": "2026-10-05", "to": "2026-10-05"},
+        headers=world.headers(keeper),
+    )
+    assert r.status_code == 200
+    assert "spreadsheetml" in r.headers["content-type"]
+    assert "attendance-2026-10-05.xlsx" in r.headers["content-disposition"]
+    book = load_workbook(io.BytesIO(r.content))
+    assert book.sheetnames == ["Attendance", "Delinquencies"]
+    mine = [
+        row
+        for row in book["Attendance"].iter_rows(values_only=True)
+        if row[1] == emp["employeeCode"]
+    ]
+    assert len(mine) == 1 and mine[0][3] == "Project One" and mine[0][7] is not None
+    assert "never checked out" in mine[0][14]
+    bad = [
+        row
+        for row in book["Delinquencies"].iter_rows(values_only=True)
+        if row[1] == emp["employeeCode"]
+    ]
+    assert [b[4] for b in bad] == ["Checked in, never checked out"]
+    with migrated_engine.connect() as conn:
+        assert (
+            conn.execute(
+                text(
+                    "SELECT count(*) FROM hr.audit_log WHERE action = 'ATTENDANCE_REPORT_DOWNLOADED'"
+                )
+            ).scalar_one()
+            >= 1
+        )
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"from": "2026-10-05", "to": "2026-12-30"},
+        {"from": "2026-10-05", "to": "2026-10-04"},
+        {"from": "2099-01-01"},
+        {"from": "not-a-date"},
+    ],
+)
+def test_the_report_refuses_bad_ranges(world, params):
+    _, keeper = _hr(world)
+    r = world.client.get("/hr/v1/attendance/report", params=params, headers=world.headers(keeper))
+    assert r.status_code == 422
+
+
+def test_only_hr_can_see_the_daily_view_and_the_report(world):
+    admin, _ = _hr(world)
+    nobody = world.grant(str(uuid.uuid4()))
+    for path in ("/hr/v1/attendance/daily", "/hr/v1/attendance/report", "/hr/v1/work-assignments"):
+        assert world.client.get(path, headers=world.headers(nobody)).status_code == 403
+    assert (
+        world.client.get("/hr/v1/work-assignments", headers=world.headers(admin)).status_code == 403
+    )
+
+
+def test_work_assignments_list_each_employees_projects_roles_and_outlets(world):
+    admin, keeper = _hr(world)
+    emp, user = _person(world, admin)
+    lone, _ = _person(world, admin)
+    world.assign(user, "PC", outlet=OUTLET, project=("P1", "Project One"))
+    world.assign(
+        user,
+        "PC",
+        outlet=("Unmapped", None, None),
+        tenant="tenant-b",
+        project=("P2", "Project Two"),
+    )
+    body = world.client.get("/hr/v1/work-assignments", headers=world.headers(keeper)).json()
+    people = {e["employeeCode"]: e for e in body["employees"]}
+    mine = people[emp["employeeCode"]]["assignments"]
+    assert sorted((a["projectCode"], a["role"], a["outletHasLocation"]) for a in mine) == [
+        ("P1", "PC", True),
+        ("P2", "PC", False),
+    ]
+    assert people[lone["employeeCode"]]["assignments"] == []
+    assert {p["projectCode"] for p in body["projects"]} >= {"P1", "P2"}
+    only = world.client.get(
+        "/hr/v1/work-assignments", params={"projectCode": "P2"}, headers=world.headers(keeper)
+    ).json()
+    assert [e["employeeCode"] for e in only["employees"]] == [emp["employeeCode"]]

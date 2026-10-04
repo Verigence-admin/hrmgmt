@@ -193,18 +193,21 @@ class World:
         tenant: str = "tenant-a",
         outlet: tuple[str, float, float] | None = None,
         valid_from: datetime | None = None,
+        project: tuple[str, str] = ("P1", "Project One"),
     ) -> None:
         with self.engine.begin() as conn:
             conn.execute(
                 text(
                     "INSERT INTO hr.work_assignment (security_user_id, tenant_id, project_code,"
                     " project_name, role_code, outlet_id, outlet_name, latitude, longitude,"
-                    " valid_from, last_seen_at) VALUES (CAST(:u AS uuid), :t, 'P1', 'Project One',"
+                    " valid_from, last_seen_at) VALUES (CAST(:u AS uuid), :t, :pc, :pn,"
                     " :r, CAST(:o AS uuid), :on, :la, :lo, :vf, now())"
                 ),
                 {
                     "u": user_id,
                     "t": tenant,
+                    "pc": project[0],
+                    "pn": project[1],
                     "r": role,
                     "o": str(uuid.uuid4()) if outlet else None,
                     "on": outlet[0] if outlet else None,

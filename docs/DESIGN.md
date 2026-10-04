@@ -272,3 +272,18 @@ salary (`GET /hr/v1/me/salary`, a proposal still waiting is not shown) and their
 An employee can update their address, state, district, pincode, emergency contact and their own
 qualifications (`/me/employee/qualifications`). The login email (`personal_email`) and mobile can
 be changed only by HR.
+
+## 28. Daily attendance for HR, reports, and who works on what
+
+- **Missing outlet location.** When a PC's outlet has no location on file, the attendance is still
+  captured, with a reason, and goes to HR (and the CEO) to approve, not to the Team Lead.
+- **Daily view** (`GET /hr/v1/attendance/daily?date=`): HR sees every active employee's check-in
+  and check-out for a day, one row per project, with status and delinquencies. Attendance is never
+  deleted, so any earlier day, and so a whole month, can be opened.
+- **Report** (`GET /hr/v1/attendance/report?from=&to=&projectCode=`): an Excel file, one row per
+  employee, per day, per project, plus a sheet of delinquencies; at most 31 days. Each download is
+  audited. Delinquencies: absent without approved leave, checked in but never out, late check-in,
+  early check-out, away from the outlet, no outlet location. A Sunday or declared holiday is not a
+  working day unless the person worked.
+- **Who works on what** (`GET /hr/v1/work-assignments`): each employee's projects, roles and
+  outlets, from the copy of Audit Core's assignments (changed in Audit Core, refreshed daily).

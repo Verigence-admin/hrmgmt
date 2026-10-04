@@ -264,7 +264,7 @@ def _record_event(
             (
                 "You are not at an assigned outlet. Say why, and your Team Lead or Project Manager will review it."
                 if "OUT_OF_FENCE" in needs_reason
-                else "No outlet location is on file for you. Say why, and it will be reviewed."
+                else "No outlet location is on file for you. Say why, and HR will review it."
             ),
         )
 
@@ -820,7 +820,10 @@ def pending_attendance_exceptions(
         eid = str(r["employee_id"])
         if eid not in decides:
             decides[eid] = decides_attendance(conn, authorizer, user, eid, now)
-        if not decides[eid]:
+        if r["kind"] == "NO_OUTLET_LOCATION":
+            if not decides_attendance(conn, authorizer, user, eid, now, r["kind"]):
+                continue
+        elif not decides[eid]:
             continue
         side = "check_in" if r["event"] == "CHECK_IN" else "check_out"
         items.append(
@@ -868,7 +871,7 @@ def decide_attendance_exception(
     row = (
         conn.execute(
             text(
-                "SELECT employee_id, status, work_date FROM hr.attendance_exception"
+                "SELECT employee_id, status, work_date, kind FROM hr.attendance_exception"
                 " WHERE exception_id = CAST(:x AS uuid) FOR UPDATE"
             ),
             {"x": xid},
@@ -879,7 +882,7 @@ def decide_attendance_exception(
     if row is None:
         raise not_found("Request not found.")
     employee_id = str(row["employee_id"])
-    if not decides_attendance(conn, authorizer, user, employee_id, clock()):
+    if not decides_attendance(conn, authorizer, user, employee_id, clock(), row["kind"]):
         raise not_found("Request not found.")  # not shown to anyone who may not decide it
     if row["status"] != "PENDING":
         raise conflict("APPROVAL_ALREADY_DECIDED", "This request has already been decided.")
