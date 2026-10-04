@@ -228,6 +228,7 @@ def _structure_view(r: Any) -> dict[str, Any]:
         "decidedAt": r["decided_at"].isoformat() if r["decided_at"] else None,
         "decisionNote": r["decision_note"],
         "templatePending": not r["components"],
+        "pfApplicable": bool(r["pf_applicable"]),
     }
 
 
@@ -238,6 +239,8 @@ class StructureIn(BaseModel):
     effective_from: date
     template_id: str | None = None
     band_confirmed: bool = False
+    # PF is optional only for a gross of ₹25,000 or more; below that it always applies.
+    pf_applicable: bool = True
     note: str | None = Field(default=None, max_length=300)
 
 
@@ -317,6 +320,12 @@ def create_structure(
     ):
         raise not_found("Employee not found.")
     gross = body.gross_monthly
+    if not body.pf_applicable and gross < BAND_HIGH:
+        raise ApiError(
+            422,
+            "PF_NOT_OPTIONAL",
+            "Provident Fund can be left out only for a gross of ₹25,000 or more.",
+        )
     template = None
     if body.template_id:
         template = (
@@ -357,8 +366,8 @@ def create_structure(
     sid = str(
         conn.execute(
             text(
-                "INSERT INTO hr.salary_structure (employee_id, template_id, gross_monthly, components, effective_from, note, proposed_by)"
-                " VALUES (CAST(:e AS uuid), :t, :g, CAST(:c AS jsonb), :d, :n, :u) RETURNING structure_id"
+                "INSERT INTO hr.salary_structure (employee_id, template_id, gross_monthly, components, effective_from, note, proposed_by, pf_applicable)"
+                " VALUES (CAST(:e AS uuid), :t, :g, CAST(:c AS jsonb), :d, :n, :u, :pf) RETURNING structure_id"
             ),
             {
                 "e": eid,
@@ -368,6 +377,7 @@ def create_structure(
                 "d": body.effective_from,
                 "n": body.note,
                 "u": user.user_id,
+                "pf": body.pf_applicable,
             },
         ).scalar_one()
     )
@@ -381,6 +391,7 @@ def create_structure(
             "structureId": sid,
             "effectiveFrom": body.effective_from.isoformat(),
             "template": template["code"] if template else None,
+            "pfApplicable": body.pf_applicable,
         },
         request=request,
     )

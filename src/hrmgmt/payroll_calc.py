@@ -180,8 +180,11 @@ def compute_line(
     statutory: dict[str, Any],
     claims: list[dict[str, Any]],
     adjustments: list[dict[str, Any]],
+    pf_applicable: bool = True,
 ) -> dict[str, Any]:
-    """The payslip numbers for one person for one month."""
+    """The payslip numbers for one person for one month. PF is left out when the salary says it
+    does not apply (a choice open only at a gross of ₹25,000 or more), and ESI is left out when no
+    component of the salary counts as ESI wage."""
     factor = days.paid_days / Decimal(days.in_month)
     earnings = []
     pf_wage = ZERO
@@ -202,7 +205,7 @@ def compute_line(
     deductions: list[dict[str, Any]] = []
     employer: list[dict[str, Any]] = []
     pf = statutory["pf"]
-    if pf["enabled"]:
+    if pf["enabled"] and pf_applicable:
         base = pf_wage
         if pf.get("wage_ceiling") is not None:
             base = min(base, Decimal(pf["wage_ceiling"]))
@@ -225,7 +228,7 @@ def compute_line(
             }
         )
     esi = statutory["esi"]
-    if esi["enabled"] and gross_full <= Decimal(esi["gross_threshold"]):
+    if esi["enabled"] and esi_wage > 0 and gross_full <= Decimal(esi["gross_threshold"]):
         deductions.append(
             {
                 "code": "ESI_EMPLOYEE",

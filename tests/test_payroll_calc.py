@@ -284,3 +284,32 @@ def test_statutory_validation_demands_every_number_when_a_scheme_is_on():
 
 def test_calendar_helper():
     assert pc.days_in_month(date(2026, 2, 1)) == 28 and pc.days_in_month(date(2028, 2, 1)) == 29
+
+
+def test_esi_is_left_out_when_no_component_counts_as_esi_wage():
+    no_esi = [{**c, "esi_wage": False} for c in TEMPLATE]
+    figures = pc.compute_line(
+        structure=pc.resolve_components(no_esi, Decimal("20000")),
+        days=full_month(),
+        statutory=STATUTORY,
+        claims=[],
+        adjustments=[],
+    )
+    assert [d["code"] for d in figures["deductions"] if d["code"].startswith("ESI")] == []
+    assert [e["code"] for e in figures["employer"] if e["code"].startswith("ESI")] == []
+
+
+def test_provident_fund_is_left_out_when_the_salary_says_it_does_not_apply():
+    base = dict(
+        structure=structure("40000"),
+        days=full_month(),
+        statutory=STATUTORY,
+        claims=[],
+        adjustments=[],
+    )
+    with_pf = pc.compute_line(**base)
+    without = pc.compute_line(**base, pf_applicable=False)
+    assert any(d["code"] == "PF_EMPLOYEE" for d in with_pf["deductions"])
+    assert not any(d["code"] == "PF_EMPLOYEE" for d in without["deductions"])
+    assert not any(e["code"] == "PF_EMPLOYER" for e in without["employer"])
+    assert Decimal(without["net_pay"]) > Decimal(with_pf["net_pay"])

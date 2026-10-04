@@ -79,8 +79,8 @@ def test_preview_says_what_would_happen_and_saves_nothing(world, migrated_engine
     assert by_row[2]["status"] == "READY" and by_row[2]["designation"] == "Senior Analyst"
     assert by_row[2]["salaryAction"] == "PROPOSE" and by_row[2]["effectiveFrom"] == "2026-09-01"
     assert by_row[3]["status"] == "READY"
-    assert by_row[3]["salaryAction"] == "PROPOSE" and by_row[3]["templatePending"] is True
-    assert r.json()["summary"]["templatePending"] == 1
+    assert by_row[3]["salaryAction"] == "PROPOSE" and by_row[3]["templatePending"] is False
+    assert r.json()["summary"]["templatePending"] == 0
     assert by_row[5]["status"] == "ERROR" and "No employee" in by_row[5]["errors"][0]
     assert by_row[6]["status"] == "ERROR" and "listed designations" in by_row[6]["errors"][0]
     with migrated_engine.connect() as conn:
@@ -130,7 +130,7 @@ def test_commit_sets_designations_and_proposes_salaries_once(world, migrated_eng
             .all()
         )
     assert [(s, float(g), str(d)) for s, g, d in plain] == [("PROPOSED", 40000.0, "2026-09-01")]
-    assert [(b[0], b[1], b[2]) for b in band] == [("PROPOSED", None, "[]")]  # template pending
+    assert len(band) == 1 and band[0][0] == "PROPOSED" and band[0][1] is not None  # uses MID
     assert not any(
         "40000" in a or "60000" in a for a in audit
     )  # salaries stay out of the audit log
@@ -183,24 +183,32 @@ def test_bad_files_and_too_many_rows_are_refused(world):
 
 
 @pytest.fixture()
-def mid_template_cleanup(migrated_engine):
+def mid_template_missing(migrated_engine):
+    """The middle template is seeded; take it away for a test, then put it back."""
+    with migrated_engine.begin() as conn:
+        conn.execute(
+            text("UPDATE hr.salary_template SET active = false WHERE code = 'MID_21K_25K'")
+        )
     yield
     with migrated_engine.begin() as conn:
         conn.execute(
             text(
-                "DELETE FROM hr.salary_structure WHERE template_id IN"
-                " (SELECT template_id FROM hr.salary_template WHERE code = 'MID_21K_25K')"
+                "DELETE FROM hr.salary_structure WHERE template_id IS NULL"
+                " AND components = '[]'::jsonb"
             )
         )
-        conn.execute(text("DELETE FROM hr.salary_template WHERE code = 'MID_21K_25K'"))
+        conn.execute(text("UPDATE hr.salary_template SET active = true WHERE code = 'MID_21K_25K'"))
 
 
-def test_a_template_pending_salary_cannot_be_approved_and_fills_when_the_middle_template_is_made(
-    world, migrated_engine, mid_template_cleanup
+def test_a_template_pending_salary_cannot_be_approved_and_fills_when_the_template_returns(
+    world, migrated_engine, mid_template_missing
 ):
     hr, people = _setup(world)
     finance = world.grant(str(uuid.uuid4()), perm.HR_SALARY_APPROVE, perm.HR_PAYROLL_READ)
     data = _sheet(_rows(people))
+    pre = _post(world, hr, "preview", data).json()
+    assert pre["summary"]["templatePending"] == 1
+    assert [x["templatePending"] for x in pre["rows"] if x["row"] == 3] == [True]
     _post(world, hr, "commit", data, rows="3")  # the 23,000 row
     emp = world.client.get(
         f"/hr/v1/employees/{people['band'][1]}", headers=world.headers(hr)
@@ -220,24 +228,21 @@ def test_a_template_pending_salary_cannot_be_approved_and_fills_when_the_middle_
     )
     assert blocked.status_code == 409 and blocked.json()["code"] == "SALARY_TEMPLATE_PENDING"
 
-    template = {
-        "name": "Gross 21,001 to 24,999",
-        "components": [
-            {
-                "code": "BASIC",
-                "label": "Basic",
-                "basis": "PERCENT_GROSS",
-                "value": "50",
-                "pf_wage": True,
-            },
-            {"code": "HRA", "label": "HRA", "basis": "PERCENT_BASIC", "value": "40"},
-            {"code": "OTHER", "label": "Other allowance", "basis": "REMAINDER"},
-        ],
-    }
-    made = world.client.post(
-        "/hr/v1/payroll/templates?code=MID_21K_25K", json=template, headers=world.headers(hr)
+    templates = world.client.get("/hr/v1/payroll/templates", headers=world.headers(hr)).json()[
+        "items"
+    ]
+    mid = next(t for t in templates if t["code"] == "MID_21K_25K")
+    back = world.client.put(
+        f"/hr/v1/payroll/templates/{mid['templateId']}",
+        json={
+            "name": mid["name"],
+            "description": mid["description"],
+            "components": mid["components"],
+            "active": True,
+        },
+        headers=world.headers(hr),
     )
-    assert made.status_code == 201, made.text
+    assert back.status_code == 200, back.text
     filled = world.client.get(
         "/hr/v1/payroll/structures",
         params={"employee_id": people["band"][1]},
@@ -251,16 +256,3 @@ def test_a_template_pending_salary_cannot_be_approved_and_fills_when_the_middle_
         headers=world.headers(finance),
     )
     assert approved.status_code == 200 and approved.json()["status"] == "APPROVED"
-
-    # with the template in place, a new salary in the band picks it without anyone choosing
-    other, _ = world.employee(hr, date_of_joining="2026-09-01")
-    auto = world.client.post(
-        "/hr/v1/payroll/structures",
-        json={
-            "employee_id": other["employeeId"],
-            "gross_monthly": "24999",
-            "effective_from": "2026-09-01",
-        },
-        headers=world.headers(hr),
-    )
-    assert auto.status_code == 201 and auto.json()["templatePending"] is False

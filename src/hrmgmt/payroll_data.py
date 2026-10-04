@@ -152,6 +152,7 @@ def build_line(
         statutory=statutory,
         claims=unpaid_claims(conn, str(employee["employee_id"]), month),
         adjustments=adjustments,
+        pf_applicable=bool(structure["pf_applicable"]),
     )
     return structure, figures
 

@@ -115,6 +115,18 @@ def team(world):
     return Team(world)
 
 
+@pytest.fixture()
+def mid_template_missing(migrated_engine):
+    """The middle template is seeded; take it away for one test, then put it back."""
+    with migrated_engine.begin() as conn:
+        conn.execute(
+            text("UPDATE hr.salary_template SET active = false WHERE code = 'MID_21K_25K'")
+        )
+    yield
+    with migrated_engine.begin() as conn:
+        conn.execute(text("UPDATE hr.salary_template SET active = true WHERE code = 'MID_21K_25K'"))
+
+
 # ---- salary structures ---------------------------------------------------------------------
 
 
@@ -129,7 +141,9 @@ def test_default_template_is_picked_by_gross_and_parts_add_up(team):
     assert [c["code"] for c in high["components"]] == ["BASIC", "HRA", "SPECIAL"]
 
 
-def test_the_21k_to_24999_band_needs_a_chosen_and_confirmed_template_until_its_own_exists(team):
+def test_the_21k_to_24999_band_needs_a_chosen_and_confirmed_template_until_its_own_exists(
+    team, mid_template_missing
+):
     eid, _ = team.employee()
     body = {"employee_id": eid, "gross_monthly": "22000", "effective_from": "2026-01-01"}
     r = team.call("post", "/payroll/structures", team.hr, json=body)
@@ -581,3 +595,38 @@ def test_an_employee_cannot_set_or_change_their_own_salary(team):
         "/hr/v1/me/employee", json={"gross_monthly": 1}, headers=team.w.headers(user)
     )
     assert r.status_code == 422
+
+
+# ---- the middle template and PF as a choice --------------------------------------------------
+
+
+def test_the_middle_template_exists_has_no_esi_and_is_used_by_itself(team):
+    templates = {
+        t["code"]: t for t in team.call("get", "/payroll/templates", team.hr).json()["items"]
+    }
+    mid = templates["MID_21K_25K"]
+    assert mid["active"] and all(c["esi_wage"] is False for c in mid["components"])
+    eid, _ = team.employee()
+    for gross in ("21001", "24999.99"):
+        s = team.salary(eid, gross, approve=False)
+        assert s["templateId"] == mid["templateId"] and s["templatePending"] is False
+        assert sum(Decimal(c["amount"]) for c in s["components"]) == Decimal(gross)
+    assert all(c["esi_wage"] is True for c in templates["ABOVE_25K"]["components"])
+
+
+def test_pf_can_be_left_out_only_for_a_gross_of_25000_or_more(team):
+    eid, _ = team.employee()
+    body = {"employee_id": eid, "gross_monthly": "24999", "effective_from": "2026-01-01"}
+    r = team.call("post", "/payroll/structures", team.hr, json={**body, "pf_applicable": False})
+    assert r.status_code == 422 and r.json()["code"] == "PF_NOT_OPTIONAL"
+    ok = team.call(
+        "post",
+        "/payroll/structures",
+        team.hr,
+        json={**body, "gross_monthly": "25000", "pf_applicable": False},
+    )
+    assert ok.status_code == 201 and ok.json()["pfApplicable"] is False
+    default = team.call(
+        "post", "/payroll/structures", team.hr, json={**body, "gross_monthly": "30000"}
+    )
+    assert default.json()["pfApplicable"] is True

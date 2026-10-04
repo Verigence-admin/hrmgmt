@@ -304,3 +304,12 @@ the sheet can be run again. Salary amounts never go in the audit log.
 Department is one of Finance, CRM, HR, Audit or IT (`GET /hr/v1/departments`). It is checked on
 create, update and import (spelling is normalised; anything else is refused, or noted and left empty
 in a spreadsheet). Records that already hold some other text keep it until HR picks one.
+
+## 31. The middle template, ESI and PF
+
+The third default template `MID_21K_25K` (gross ₹21,001 to ₹24,999) is created with the system, with
+a placeholder split like the other two for HR to edit before first use. No component of it counts as
+ESI wage, and a salary with no ESI wage has no ESI line at all. PF is optional for a gross of ₹25,000
+or more: the salary carries `pf_applicable` (default true); false is accepted only at ₹25,000 or
+more, and then the payslip has no PF line. Changing it means proposing a new salary, which Finance
+approves like any other.
