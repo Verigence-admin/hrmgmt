@@ -108,3 +108,28 @@ def decides_leave(
         return has_permission(authorizer, actor, perm.HR_LEAVE_REVIEW)
     roles = ("PM",) if rule == "PM" else ("TL", "PM")
     return actor.user_id in wc.project_approvers(conn, employee_id, at, roles)
+
+
+# ---- reimbursement claims --------------------------------------------------------------------
+
+
+def decides_claim_stage(
+    conn: Connection,
+    authorizer: Authorizer,
+    actor: HumanPrincipal,
+    employee_id: str,
+    stage: str,
+    at: datetime,
+) -> bool:
+    employee_user = wc.employee_user_id(conn, employee_id)
+    if employee_user is not None and employee_user == actor.user_id:
+        return False
+    if is_ceo(authorizer, actor.user_id):
+        return True
+    if stage == "TL_PM":
+        return actor.user_id in wc.project_approvers(conn, employee_id, at, ("TL", "PM"))
+    if stage == "HR":
+        return has_permission(authorizer, actor, perm.HR_CLAIM_REVIEW)
+    if stage == "FINANCE":
+        return has_permission(authorizer, actor, perm.HR_CLAIM_REVIEW_FINANCE)
+    return False
