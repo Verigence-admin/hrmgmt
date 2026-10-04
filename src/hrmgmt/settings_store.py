@@ -80,6 +80,13 @@ SPECS: dict[str, Spec] = {
     "claims.personal_bike_rate_per_km": Spec(
         "money", 0, 0, 1000, "Personal bike rate per km (₹)", "Reimbursement"
     ),
+    "company.name": Spec("text", "", label="Company name (printed on payslips)", group="Company"),
+    "company.address": Spec(
+        "text", "", label="Company address (printed on payslips)", group="Company"
+    ),
+    "company.pan": Spec("text", "", label="Company PAN", group="Company"),
+    "company.pf_registration": Spec("text", "", label="PF registration number", group="Company"),
+    "company.esi_registration": Spec("text", "", label="ESI registration number", group="Company"),
 }
 
 _TIME = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
