@@ -61,10 +61,14 @@ class SmtpMailer:
         message["Subject"] = subject
         message.set_content(body)
         message.add_alternative(body_to_html(body), subtype="html")
+        stage = "connect"
         try:
             with smtplib.SMTP(self._host, self._port, timeout=self._timeout) as server:
+                stage = "starttls"
                 server.starttls(context=ssl.create_default_context())
+                stage = "login"
                 server.login(self._user, self._password)
+                stage = "send"
                 server.send_message(message)
         except smtplib.SMTPAuthenticationError as exc:
             logger.warning("hr_mail_failed", reason="auth")
@@ -73,5 +77,15 @@ class SmtpMailer:
             logger.warning("hr_mail_failed", reason="recipient")
             raise MailError("MAIL_RECIPIENT_REFUSED", "The address was refused") from exc
         except (smtplib.SMTPException, OSError) as exc:
-            logger.warning("hr_mail_failed", reason=type(exc).__name__)
+            # What went wrong and where, so a network block can be told from a mail-account problem.
+            # The message text of these errors never carries the password.
+            logger.warning(
+                "hr_mail_failed",
+                reason=type(exc).__name__,
+                stage=stage,
+                errno=getattr(exc, "errno", None),
+                detail=str(exc)[:160],
+                host=self._host,
+                port=self._port,
+            )
             raise MailError("MAIL_UNAVAILABLE", "The mail server could not be reached") from exc
