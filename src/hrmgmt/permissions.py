@@ -13,6 +13,15 @@ HR_EMPLOYEE_MANAGE = "hr.employee.manage"
 HR_SENSITIVE_READ = "hr.sensitive.read"
 HR_AUDIT_READ = "hr.audit.read"
 HR_SETTINGS_MANAGE = "hr.settings.manage"
+HR_ATTENDANCE_READ_ALL = "hr.attendance.read_all"
+HR_LEAVE_REVIEW = "hr.leave.review"
+HR_CLAIM_REVIEW = "hr.claim.review"
+HR_CLAIM_REVIEW_FINANCE = "hr.claim.review_finance"
+HR_SALARY_PROPOSE = "hr.salary.propose"
+HR_SALARY_APPROVE = "hr.salary.approve"
+HR_PAYROLL_READ = "hr.payroll.read"
+HR_PAYROLL_PREPARE = "hr.payroll.prepare"
+HR_PAYROLL_APPROVE = "hr.payroll.approve"
 
 # Shown to the UI by GET /hr/v1/me so it can choose navigation. The server still re-checks
 # every protected request; the UI list is a convenience, never the authority.
@@ -22,4 +31,13 @@ ALL_PERMISSIONS: tuple[str, ...] = (
     HR_SENSITIVE_READ,
     HR_AUDIT_READ,
     HR_SETTINGS_MANAGE,
+    HR_ATTENDANCE_READ_ALL,
+    HR_LEAVE_REVIEW,
+    HR_CLAIM_REVIEW,
+    HR_CLAIM_REVIEW_FINANCE,
+    HR_SALARY_PROPOSE,
+    HR_SALARY_APPROVE,
+    HR_PAYROLL_READ,
+    HR_PAYROLL_PREPARE,
+    HR_PAYROLL_APPROVE,
 )

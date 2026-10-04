@@ -44,6 +44,8 @@ class Settings:
     allowed_origins: tuple[str, ...]
     db_pool_size: int
     db_max_overflow: int
+    audit_core_base_url: str = ""
+    google_maps_api_key: str = ""
 
     @property
     def storage_configured(self) -> bool:
@@ -96,6 +98,8 @@ def load_settings() -> Settings:
         allowed_origins=tuple(dict.fromkeys([*origins, *_CAPACITOR_ORIGINS])),
         db_pool_size=_int("HR_DB_POOL_SIZE", 5, 1, 20),
         db_max_overflow=_int("HR_DB_MAX_OVERFLOW", 5, 0, 20),
+        audit_core_base_url=os.environ.get("AUDIT_CORE_BASE_URL", "").strip(),
+        google_maps_api_key=os.environ.get("GOOGLE_MAPS_API_KEY", "").strip(),
     )
 
 

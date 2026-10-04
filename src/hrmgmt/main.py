@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from hrmgmt.api.admin import router as admin_router
+from hrmgmt.api.attendance import router as attendance_router
 from hrmgmt.api.employee_import import router as employee_import_router
 from hrmgmt.api.employees import router as employees_router
 from hrmgmt.api.meta import router as meta_router
@@ -13,9 +15,11 @@ from hrmgmt.authz import SecurityAuthorizer
 from hrmgmt.config import Settings, get_settings
 from hrmgmt.db import get_engine
 from hrmgmt.errors import install_error_handlers
+from hrmgmt.geocode import GoogleReverseGeocoder
 from hrmgmt.provisioning import SecurityUserProvisioner
 from hrmgmt.security import SecurityTokenValidator
 from hrmgmt.storage import S3Storage
+from hrmgmt.workcontext import DailySync, WorkContextClient
 
 logger = structlog.get_logger(__name__)
 
@@ -39,6 +43,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.authorizer = None
     app.state.provisioner = None
     app.state.storage = None
+    app.state.geocoder = None
+    app.state.workcontext = None
+    app.state.clock = None
     if settings.security_jwks_url and settings.security_issuer and settings.security_audience:
         app.state.validator = SecurityTokenValidator(
             jwks_url=settings.security_jwks_url,
@@ -72,6 +79,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         logger.warning("hr_file_storage_not_configured")
 
     app.include_router(meta_router)
+    if settings.google_maps_api_key:
+        app.state.geocoder = GoogleReverseGeocoder(settings.google_maps_api_key)
+    else:
+        logger.warning("hr_reverse_geocoding_not_configured")
+    if settings.audit_core_base_url and app.state.authorizer is not None:
+        app.state.workcontext = WorkContextClient(
+            base_url=settings.audit_core_base_url, token_provider=app.state.authorizer.service_token
+        )
+    else:
+        logger.warning("hr_work_context_not_configured")
+
+    app.include_router(admin_router)
+    app.include_router(attendance_router)
     app.include_router(employee_import_router)
     app.include_router(employees_router)
 
@@ -93,4 +113,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 def app_factory() -> FastAPI:
-    return create_app()
+    app = create_app()
+    if app.state.workcontext is not None:
+        # Once a day, in the background: HR requests never wait on Audit Core.
+        daily = DailySync(get_engine(), app.state.workcontext)
+        app.add_event_handler("startup", daily.start)
+        app.add_event_handler("shutdown", daily.stop)
+    return app

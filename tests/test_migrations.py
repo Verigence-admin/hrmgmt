@@ -50,13 +50,14 @@ def test_audit_log_is_append_only(migrated_engine):
 def test_unknown_recorded_revision_is_refused(migrated_engine):
     """The database knows a revision this repository does not: Alembic must stop, not guess."""
     with migrated_engine.begin() as conn:
+        original = conn.execute(text("SELECT version_num FROM hr.alembic_version")).scalar_one()
         conn.execute(text("UPDATE hr.alembic_version SET version_num = '9999_from_the_future'"))
     try:
         with pytest.raises(Exception, match="9999_from_the_future"):
             command.upgrade(alembic_config(), "head")
     finally:
         with migrated_engine.begin() as conn:
-            conn.execute(text("UPDATE hr.alembic_version SET version_num = '0001_baseline'"))
+            conn.execute(text("UPDATE hr.alembic_version SET version_num = :v"), {"v": original})
 
 
 def test_downgrade_is_refused():

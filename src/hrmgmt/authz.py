@@ -52,8 +52,7 @@ class SecurityAuthorizer:
             transport=transport,
         )
         self._client = httpx.Client(base_url=base, timeout=timeout_seconds, transport=transport)
-        self._token: str | None = None
-        self._token_until = 0.0
+        self._tokens: dict[str, tuple[str, float]] = {}
         self._token_lock = threading.Lock()
         self._allow: dict[tuple[str, str], float] = {}
         self._allow_lock = threading.Lock()
@@ -62,19 +61,24 @@ class SecurityAuthorizer:
         self._token_client.close()
         self._client.close()
 
-    def service_token(self) -> str:
+    def service_token(self, audience: str = "security") -> str:
+        """A service token for one audience (Security's own, or another service such as Audit
+        Core), reused until shortly before it expires. One attempt, no retries."""
         with self._token_lock:
-            if self._token and time.monotonic() < self._token_until:
-                return self._token
+            cached = self._tokens.get(audience)
+            if cached and time.monotonic() < cached[1]:
+                return cached[0]
             try:
                 response = self._token_client.post(
-                    "/security/v1/service/token", data={"audience": "security"}
+                    "/security/v1/service/token", data={"audience": audience}
                 )
             except httpx.HTTPError as exc:
                 logger.warning("hr_security_token_failed", reason="endpoint_unavailable")
                 raise AuthzUnavailableError("Security token endpoint is unavailable") from exc
             if response.status_code != 200:
-                logger.warning("hr_security_token_failed", http_status=response.status_code)
+                logger.warning(
+                    "hr_security_token_failed", http_status=response.status_code, audience=audience
+                )
                 raise AuthzUnavailableError(
                     f"Security token request failed (HTTP {response.status_code})"
                 )
@@ -85,14 +89,13 @@ class SecurityAuthorizer:
                 not isinstance(token, str)
                 or not token
                 or payload.get("tokenType") != "Bearer"
-                or payload.get("audience") != "security"
+                or payload.get("audience") != audience
             ):
                 raise AuthzUnavailableError("Security token response is not valid")
             reuse = _DEFAULT_TOKEN_REUSE_SECONDS
             if isinstance(expires_in, int) and not isinstance(expires_in, bool) and expires_in > 0:
                 reuse = max(0.0, expires_in - max(_TOKEN_SKEW_SECONDS, expires_in * 0.1))
-            self._token = token
-            self._token_until = time.monotonic() + reuse
+            self._tokens[audience] = (token, time.monotonic() + reuse)
             return token
 
     def is_allowed(self, *, user_id: str, permission_key: str) -> bool:

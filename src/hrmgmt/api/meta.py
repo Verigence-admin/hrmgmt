@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
@@ -26,7 +27,12 @@ def me(
     """Who the caller is, which HR powers they hold, and whether an employee record is linked to
     their login, so the UI can pick navigation in one call. The server re-checks every protected
     request regardless of this answer."""
-    granted = [p for p in perm.ALL_PERMISSIONS if has_permission(authorizer, user, p)]
+    # One question per permission, asked side by side so the answer takes about one round trip.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        answers = list(
+            pool.map(lambda p: has_permission(authorizer, user, p), perm.ALL_PERMISSIONS)
+        )
+    granted = [p for p, ok in zip(perm.ALL_PERMISSIONS, answers, strict=True) if ok]
     return {
         "userId": user.user_id,
         "permissions": granted,
