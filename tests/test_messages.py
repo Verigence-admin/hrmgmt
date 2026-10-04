@@ -95,6 +95,9 @@ def test_smtp_mailer_sends_once_with_tls_and_maps_failures(monkeypatch):
         def starttls(self, context):
             calls.append("starttls")
 
+        def ehlo(self):
+            calls.append("ehlo")
+
         def login(self, user, password):
             calls.append("login")
             if FakeSmtp.fail:
@@ -109,7 +112,7 @@ def test_smtp_mailer_sends_once_with_tls_and_maps_failures(monkeypatch):
     monkeypatch.setattr(mailer_mod.smtplib, "SMTP", FakeSmtp)
     m = SmtpMailer(host="smtp.example.com", port=587, user="hr@example.com", password="pw")
     m.send(to="a@example.com", subject="S", body="Hello <b>")
-    assert calls == ["connect smtp.example.com:587", "starttls", "login", "send"]
+    assert calls == ["connect smtp.example.com:587", "starttls", "ehlo", "login", "send"]
     FakeSmtp.fail = smtplib.SMTPAuthenticationError(535, b"no")
     with pytest.raises(MailError) as err:
         m.send(to="a@example.com", subject="S", body="x")
