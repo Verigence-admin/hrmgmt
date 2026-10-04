@@ -14,7 +14,7 @@ logger = structlog.get_logger(__name__)
 
 _CHECK_SIDE = 640
 # A face smaller than this share of the shorter side is too small to be the person taking the photo.
-_MIN_FACE_SHARE = 0.12
+_MIN_FACE_SHARE = 0.10
 
 
 @lru_cache(maxsize=1)
