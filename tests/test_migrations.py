@@ -8,7 +8,7 @@ from sqlalchemy.exc import DBAPIError
 from tests.conftest import alembic_config
 
 
-def test_baseline_creates_tables_and_seeds_four_designations(migrated_engine):
+def test_migrations_create_tables_and_the_designation_ladder(migrated_engine):
     with migrated_engine.connect() as conn:
         tables = {
             r[0]
@@ -18,15 +18,25 @@ def test_baseline_creates_tables_and_seeds_four_designations(migrated_engine):
         }
         assert {"audit_log", "designation", "alembic_version"} <= tables
         rows = conn.execute(
-            text("SELECT code, label FROM hr.designation ORDER BY sort_order")
+            text("SELECT code, label FROM hr.designation WHERE active ORDER BY sort_order")
         ).all()
-    assert [r[1] for r in rows] == ["Auditor", "Senior Auditor", "Assistant Manager", "Manager"]
+    assert [r[1] for r in rows] == [
+        "Analyst",
+        "Senior Analyst",
+        "Consultant",
+        "Senior Consultant",
+        "Assistant Manager",
+        "Manager",
+        "Senior Manager",
+        "Director",
+        "Partner",
+    ]
 
 
 def test_upgrade_is_repeatable(migrated_engine):
     command.upgrade(alembic_config(), "head")
     with migrated_engine.connect() as conn:
-        assert conn.execute(text("SELECT count(*) FROM hr.designation")).scalar_one() == 4
+        assert conn.execute(text("SELECT count(*) FROM hr.designation")).scalar_one() == 11
 
 
 def test_audit_log_is_append_only(migrated_engine):

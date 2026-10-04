@@ -67,7 +67,9 @@ def upgrade() -> None:
         )
         """
     )
-    op.execute("CREATE INDEX salary_structure_employee_ix ON hr.salary_structure (employee_id, effective_from)")
+    op.execute(
+        "CREATE INDEX salary_structure_employee_ix ON hr.salary_structure (employee_id, effective_from)"
+    )
     op.execute("CREATE INDEX salary_structure_status_ix ON hr.salary_structure (status)")
 
     # One row. HR enters the rates and slabs; a run cannot be approved until the CA's

@@ -100,10 +100,15 @@ def test_me_lists_only_granted_permissions(make_client):
 def test_designations_for_any_signed_in_user(make_client):
     r = make_client().get("/hr/v1/designations", headers=auth("anyone"))
     assert [d["label"] for d in r.json()] == [
-        "Auditor",
-        "Senior Auditor",
+        "Analyst",
+        "Senior Analyst",
+        "Consultant",
+        "Senior Consultant",
         "Assistant Manager",
         "Manager",
+        "Senior Manager",
+        "Director",
+        "Partner",
     ]
 
 

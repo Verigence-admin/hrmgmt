@@ -70,6 +70,33 @@ class QualificationIn(_Strict):
         return self
 
 
+class ExperienceIn(_Strict):
+    """One previous job: the company, what the person was there, and when."""
+
+    company: str = Field(min_length=2, max_length=120)
+    location: str | None = Field(default=None, max_length=80)
+    designation: str = Field(min_length=2, max_length=80)
+    from_date: date
+    to_date: date
+    description: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def _period(self) -> ExperienceIn:
+        self.company = v.clean_text(self.company) or ""
+        self.designation = v.clean_text(self.designation) or ""
+        self.location = v.clean_text(self.location)
+        self.description = v.clean_text(self.description)
+        if len(self.company) < 2 or len(self.designation) < 2:
+            raise ValueError("Company and designation are needed")
+        if self.from_date < date(1950, 1, 1):
+            raise ValueError("Start date is not valid")
+        if self.to_date < self.from_date:
+            raise ValueError("The end date cannot be before the start date")
+        if self.to_date > date.today():
+            raise ValueError("A previous job must have ended by today")
+        return self
+
+
 def _state(x: str | None) -> str | None:
     return canonical_state(x) if x else None
 
@@ -834,7 +861,169 @@ def _qualifications(conn: Connection, employee_id: str) -> list[dict[str, Any]]:
 def _detail(conn: Connection, employee_id: str) -> dict[str, Any]:
     out = _view(_fetch(conn, employee_id))
     out["qualifications"] = _qualifications(conn, employee_id)
+    out["experiences"] = _experiences(conn, employee_id)
     return out
+
+
+def _experiences(conn: Connection, employee_id: str) -> list[dict[str, Any]]:
+    rows = (
+        conn.execute(
+            text(
+                "SELECT experience_id, company, location, designation, from_date, to_date,"
+                " description FROM hr.employee_experience"
+                " WHERE employee_id = CAST(:e AS uuid) ORDER BY to_date DESC, created_at"
+            ),
+            {"e": employee_id},
+        )
+        .mappings()
+        .all()
+    )
+    return [
+        {
+            "experienceId": str(r["experience_id"]),
+            "company": r["company"],
+            "location": r["location"],
+            "designation": r["designation"],
+            "fromDate": r["from_date"].isoformat(),
+            "toDate": r["to_date"].isoformat(),
+            "description": r["description"],
+        }
+        for r in rows
+    ]
+
+
+def _experience_params(body: ExperienceIn, actor: str) -> dict[str, Any]:
+    return {
+        "c": body.company,
+        "l": body.location,
+        "d": body.designation,
+        "f": body.from_date,
+        "t": body.to_date,
+        "x": body.description,
+        "a": actor,
+    }
+
+
+def _experience_audit(body: ExperienceIn, experience_id: str) -> dict[str, Any]:
+    return {
+        "experienceId": experience_id,
+        "company": body.company,
+        "designation": body.designation,
+        "from": body.from_date.isoformat(),
+        "to": body.to_date.isoformat(),
+    }
+
+
+def _add_experience(
+    conn: Connection, employee_id: str, body: ExperienceIn, user: HumanPrincipal, request: Request
+) -> dict[str, Any]:
+    _fetch(conn, employee_id)
+    new_id = conn.execute(
+        text(
+            "INSERT INTO hr.employee_experience (employee_id, company, location, designation,"
+            " from_date, to_date, description, created_by, updated_by)"
+            " VALUES (CAST(:e AS uuid), :c, :l, :d, :f, :t, :x, :a, :a) RETURNING experience_id"
+        ),
+        {**_experience_params(body, user.user_id), "e": employee_id},
+    ).scalar_one()
+    record_audit(
+        conn,
+        actor_user_id=user.user_id,
+        action="EXPERIENCE_ADDED",
+        entity_type="employee",
+        entity_id=employee_id,
+        changes=_experience_audit(body, str(new_id)),
+        request=request,
+    )
+    return _detail(conn, employee_id)
+
+
+def _replace_experience(
+    conn: Connection,
+    employee_id: str,
+    experience_id: str,
+    body: ExperienceIn,
+    user: HumanPrincipal,
+    request: Request,
+) -> dict[str, Any]:
+    updated = conn.execute(
+        text(
+            "UPDATE hr.employee_experience SET company = :c, location = :l, designation = :d,"
+            " from_date = :f, to_date = :t, description = :x, updated_at = now(), updated_by = :a"
+            " WHERE experience_id = CAST(:i AS uuid) AND employee_id = CAST(:e AS uuid)"
+        ),
+        {**_experience_params(body, user.user_id), "i": experience_id, "e": employee_id},
+    ).rowcount
+    if not updated:
+        raise not_found("Experience not found.")
+    record_audit(
+        conn,
+        actor_user_id=user.user_id,
+        action="EXPERIENCE_UPDATED",
+        entity_type="employee",
+        entity_id=employee_id,
+        changes=_experience_audit(body, experience_id),
+        request=request,
+    )
+    return _detail(conn, employee_id)
+
+
+def _remove_experience(
+    conn: Connection, employee_id: str, experience_id: str, user: HumanPrincipal, request: Request
+) -> dict[str, Any]:
+    removed = conn.execute(
+        text(
+            "DELETE FROM hr.employee_experience"
+            " WHERE experience_id = CAST(:i AS uuid) AND employee_id = CAST(:e AS uuid)"
+        ),
+        {"i": experience_id, "e": employee_id},
+    ).rowcount
+    if not removed:
+        raise not_found("Experience not found.")
+    record_audit(
+        conn,
+        actor_user_id=user.user_id,
+        action="EXPERIENCE_REMOVED",
+        entity_type="employee",
+        entity_id=employee_id,
+        changes={"experienceId": experience_id},
+        request=request,
+    )
+    return _detail(conn, employee_id)
+
+
+@router.post("/employees/{employee_id}/experiences", status_code=201)
+def add_experience(
+    employee_id: str,
+    body: ExperienceIn,
+    request: Request,
+    user: HumanPrincipal = Depends(can_manage),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    return _add_experience(conn, _uuid(employee_id), body, user, request)
+
+
+@router.put("/employees/{employee_id}/experiences/{experience_id}")
+def replace_experience(
+    employee_id: str,
+    experience_id: str,
+    body: ExperienceIn,
+    request: Request,
+    user: HumanPrincipal = Depends(can_manage),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    return _replace_experience(conn, _uuid(employee_id), _uuid(experience_id), body, user, request)
+
+
+@router.delete("/employees/{employee_id}/experiences/{experience_id}")
+def delete_experience(
+    employee_id: str,
+    experience_id: str,
+    request: Request,
+    user: HumanPrincipal = Depends(can_manage),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    return _remove_experience(conn, _uuid(employee_id), _uuid(experience_id), user, request)
 
 
 @router.get("/degrees")
@@ -1230,6 +1419,41 @@ def delete_my_qualification(
 ) -> dict[str, Any]:
     return _remove_qualification(
         conn, _own_employee_id(conn, user), _uuid(qualification_id), user, request
+    )
+
+
+@router.post("/me/employee/experiences", status_code=201)
+def add_my_experience(
+    body: ExperienceIn,
+    request: Request,
+    user: HumanPrincipal = Depends(current_user),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    return _add_experience(conn, _own_employee_id(conn, user), body, user, request)
+
+
+@router.put("/me/employee/experiences/{experience_id}")
+def replace_my_experience(
+    experience_id: str,
+    body: ExperienceIn,
+    request: Request,
+    user: HumanPrincipal = Depends(current_user),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    return _replace_experience(
+        conn, _own_employee_id(conn, user), _uuid(experience_id), body, user, request
+    )
+
+
+@router.delete("/me/employee/experiences/{experience_id}")
+def delete_my_experience(
+    experience_id: str,
+    request: Request,
+    user: HumanPrincipal = Depends(current_user),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    return _remove_experience(
+        conn, _own_employee_id(conn, user), _uuid(experience_id), user, request
     )
 
 

@@ -339,17 +339,17 @@ def test_hr_update_records_old_and_new_but_never_protected_values(make_client, m
     eid = emp["employeeId"]
     r = client.patch(
         f"/hr/v1/employees/{eid}",
-        json={"designation_code": "SENIOR_AUDITOR", "department": "  RM ", "pan": "ZZZZZ9999Z"},
+        json={"designation_code": "SENIOR_ANALYST", "department": "  RM ", "pan": "ZZZZZ9999Z"},
         headers=auth(HR),
     )
     assert r.status_code == 200
     got = r.json()
-    assert got["designation"] == "Senior Auditor" and got["department"] == "RM"
+    assert got["designation"] == "Senior Analyst" and got["department"] == "RM"
     assert got["panMasked"] == "XXXXX9999Z"
     last = audit_rows(migrated_engine, eid)[-1]
     changes = json.loads(last[1])
     assert last[0] == "EMPLOYEE_UPDATED"
-    assert changes["designation_code"] == {"from": None, "to": "SENIOR_AUDITOR"}
+    assert changes["designation_code"] == {"from": None, "to": "SENIOR_ANALYST"}
     assert (
         changes["pan"] == "changed" and "ZZZZZ9999Z" not in last[1] and "ABCDE1234F" not in last[1]
     )
@@ -1050,3 +1050,81 @@ def test_district_university_college_round_trip_and_pending_details_clear_themse
     assert after["qualifications"][0]["university"] == "Utkal University"
     assert "DISTRICT" not in after["missingDetails"]
     assert "UNIVERSITY_COLLEGE" not in after["missingDetails"]
+
+
+def _job(**over):
+    return {
+        "company": "Acme Audit LLP",
+        "location": "Bhubaneswar",
+        "designation": "Senior Analyst",
+        "from_date": "2019-06-01",
+        "to_date": "2022-03-31",
+        "description": "Statutory audits",
+        **over,
+    }
+
+
+def test_employee_keeps_their_own_previous_experience(make_client, migrated_engine):
+    client, _ = make_client()
+    emp, me = _linked_employee(client, migrated_engine)
+    r = client.post("/hr/v1/me/employee/experiences", json=_job(), headers=auth(me))
+    assert r.status_code == 201
+    jobs = r.json()["experiences"]
+    assert jobs[0]["company"] == "Acme Audit LLP" and jobs[0]["toDate"] == "2022-03-31"
+    xid = jobs[0]["experienceId"]
+    r = client.put(
+        f"/hr/v1/me/employee/experiences/{xid}",
+        json=_job(company="Acme & Co"),
+        headers=auth(me),
+    )
+    assert r.status_code == 200 and r.json()["experiences"][0]["company"] == "Acme & Co"
+    # HR sees it too and can add one
+    assert client.get(f"/hr/v1/employees/{emp['employeeId']}", headers=auth(HR)).json()[
+        "experiences"
+    ]
+    assert (
+        client.post(
+            f"/hr/v1/employees/{emp['employeeId']}/experiences",
+            json=_job(company="Beta Advisors"),
+            headers=auth(HR),
+        ).status_code
+        == 201
+    )
+    # someone else cannot reach it, and a non-HR person cannot use the HR route
+    other, other_user = _linked_employee(client, migrated_engine)
+    assert (
+        client.put(
+            f"/hr/v1/me/employee/experiences/{xid}", json=_job(), headers=auth(other_user)
+        ).status_code
+        == 404
+    )
+    assert (
+        client.delete(f"/hr/v1/me/employee/experiences/{xid}", headers=auth(other_user)).status_code
+        == 404
+    )
+    assert (
+        client.post(
+            f"/hr/v1/employees/{emp['employeeId']}/experiences", json=_job(), headers=auth(me)
+        ).status_code
+        == 403
+    )
+    assert (
+        client.delete(f"/hr/v1/me/employee/experiences/{xid}", headers=auth(me)).status_code == 200
+    )
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"to_date": "2018-01-01"},
+        {"to_date": "2999-01-01"},
+        {"company": " "},
+        {"from_date": "1900-01-01"},
+        {"unknown": 1},
+    ],
+)
+def test_bad_experience_is_refused(make_client, migrated_engine, over):
+    client, _ = make_client()
+    _, me = _linked_employee(client, migrated_engine)
+    r = client.post("/hr/v1/me/employee/experiences", json=_job(**over), headers=auth(me))
+    assert r.status_code == 422

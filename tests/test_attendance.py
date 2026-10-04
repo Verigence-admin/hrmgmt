@@ -531,3 +531,53 @@ def test_holidays_are_listed_for_everyone_with_the_caveat_and_managed_by_hr(worl
         world.client.delete("/hr/v1/holidays/2026-12-31", headers=world.headers(hr)).status_code
         == 404
     )
+
+
+# ---- a PC mapped to several outlets -----------------------------------------------------------
+
+SECOND_OUTLET = ("Bhubaneswar Motors", 20.2961, 85.8245)  # about 20 km from the first
+NEAR_SECOND = (20.2965, 85.8248)
+
+
+def setup_pc_two_outlets(world: World):
+    hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
+    emp, user = world.employee(hr)
+    world.assign(user, "PC", outlet=OUTLET)
+    world.assign(user, "PC", outlet=SECOND_OUTLET)
+    return emp, user
+
+
+@pytest.mark.parametrize(
+    ("where", "outlet_name"), [(NEAR, "Cuttack Motors"), (NEAR_SECOND, "Bhubaneswar Motors")]
+)
+def test_a_pc_at_any_one_of_their_outlets_is_verified_and_the_right_outlet_is_recorded(
+    world, where, outlet_name
+):
+    _, user = setup_pc_two_outlets(world)
+    r = send(world, user, "in", token(world, user), where=where)
+    assert r.status_code == 200, r.text
+    assert r.json()["needsApproval"] == [] and "OUT_OF_FENCE" not in r.json()["flags"]
+    assert r.json()["outletName"] == outlet_name
+    today = world.client.get("/hr/v1/attendance/today", headers=world.headers(user)).json()
+    assert sorted(o["outletName"] for o in today["outlets"]) == [
+        "Bhubaneswar Motors",
+        "Cuttack Motors",
+    ]
+
+
+def test_a_pc_away_from_every_one_of_their_outlets_still_needs_a_reason(world):
+    _, user = setup_pc_two_outlets(world)
+    tok = token(world, user)
+    assert send(world, user, "in", tok, where=FAR).json()["code"] == "ATTENDANCE_REASON_REQUIRED"
+    r = send(world, user, "in", tok, where=FAR, reason="At a customer site")
+    assert r.json()["needsApproval"] == ["OUT_OF_FENCE"]
+
+
+def test_an_outlet_without_a_location_does_not_stop_the_others_from_working(world):
+    hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
+    _, user = world.employee(hr)
+    world.assign(user, "PC", outlet=("Unmapped Outlet", None, None))
+    world.assign(user, "PC", outlet=OUTLET)
+    r = send(world, user, "in", token(world, user), where=NEAR)
+    assert r.status_code == 200 and r.json()["needsApproval"] == []
+    assert r.json()["outletName"] == "Cuttack Motors"

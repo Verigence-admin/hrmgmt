@@ -30,7 +30,7 @@ HRMgmt never imports Audit Core or Security code. It validates Security tokens a
 
 ## 3. People: Designation and Role are two separate things
 
-**Designation** (what the person is in the company, assigned by HRAdmin, one per employee). Exactly four values, fixed as you specified: **Auditor, Senior Auditor, Assistant Manager, Manager**. Used by HR and payroll, it grants no access by itself.
+**Designation** (what the person is in the company, assigned by HRAdmin, one per employee). Nine values, in this order: **Analyst, Senior Analyst, Consultant, Senior Consultant, Assistant Manager, Manager, Senior Manager, Director, Partner**. (Auditor and Senior Auditor are retired: kept on records that already hold them, no longer offered.) Used by HR and payroll, it grants no access by itself.
 
 **Role** (what the person does in a project, set per project in Audit Core's Project Management, which already exists): **PC, TL, PM**. HRMgmt reads it from Audit Core, it never stores or assigns it. PMO is the same as PM (role key `PM`).
 
