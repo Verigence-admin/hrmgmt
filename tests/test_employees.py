@@ -458,11 +458,14 @@ def test_user_without_employee_record_gets_404_and_exited_employee_loses_access(
     client, _ = make_client()
     assert client.get("/hr/v1/me/employee", headers=auth(NOBODY)).status_code == 404
     emp, me = _linked_employee(client, migrated_engine)
-    client.patch(
-        f"/hr/v1/employees/{emp['employeeId']}",
-        json={"employment_status": "EXITED"},
-        headers=auth(HR),
-    )
+    with migrated_engine.begin() as conn:  # the status changes only through an approved request
+        conn.execute(
+            text(
+                "UPDATE hr.employee SET employment_status = 'TERMINATED'"
+                " WHERE employee_id = CAST(:e AS uuid)"
+            ),
+            {"e": emp["employeeId"]},
+        )
     assert client.get("/hr/v1/me/employee", headers=auth(me)).status_code == 404
 
 

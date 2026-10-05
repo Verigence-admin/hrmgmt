@@ -37,7 +37,7 @@ can_manage = require_permission(perm.HR_EMPLOYEE_MANAGE)
 can_read_sensitive = require_permission(perm.HR_SENSITIVE_READ)
 
 Gender = Literal["MALE", "FEMALE", "OTHER"]
-EmploymentStatus = Literal["ACTIVE", "INACTIVE", "EXITED"]
+EmploymentStatus = Literal["ACTIVE", "SUSPENDED", "TERMINATED", "QUIT"]
 
 
 class _Strict(BaseModel):
@@ -174,7 +174,6 @@ class EmployeeUpdate(_Strict):
     emergency_contact_number: str | None = Field(default=None, max_length=40)
     emergency_contact_address: str | None = Field(default=None, max_length=500)
     date_of_joining: date | None = None
-    employment_status: EmploymentStatus | None = None
     pan: str | None = None
     aadhaar: str | None = None
 
@@ -749,7 +748,10 @@ def employee_summary(
                 " count(*) FILTER (WHERE employment_status = 'ACTIVE'"
                 "                  AND security_user_id IS NOT NULL) AS active_with_login,"
                 " count(*) FILTER (WHERE employment_status = 'ACTIVE'"
-                "                  AND security_user_id IS NULL) AS active_without_login"
+                "                  AND security_user_id IS NULL) AS active_without_login,"
+                " count(*) FILTER (WHERE employment_status = 'SUSPENDED') AS suspended,"
+                " count(*) FILTER (WHERE employment_status = 'TERMINATED') AS terminated,"
+                " count(*) FILTER (WHERE employment_status = 'QUIT') AS quit"
                 " FROM hr.employee"
             )
         )
@@ -761,6 +763,9 @@ def employee_summary(
         "active": row["active"],
         "activeWithLogin": row["active_with_login"],
         "activeWithoutLogin": row["active_without_login"],
+        "suspended": row["suspended"],
+        "terminated": row["terminated"],
+        "quit": row["quit"],
     }
 
 

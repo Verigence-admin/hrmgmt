@@ -99,7 +99,7 @@ def test_a_user_created_on_its_own_is_matched_by_email_and_linked(world):
     assert item(again, emp) is None  # nothing left to do for this person
 
 
-@pytest.mark.parametrize("status", ["INACTIVE", "EXITED"])
+@pytest.mark.parametrize("status", ["SUSPENDED", "TERMINATED", "QUIT"])
 def test_an_employee_who_is_not_active_suspends_an_active_user(world, status):
     hr = hr_user(world)
     u = user(world, is_employee=True)
@@ -118,7 +118,7 @@ def test_nothing_is_reactivated_and_pending_users_are_only_reported(world):
     pending_gone = user(world, status="PENDING", is_employee=True)
     active_emp = employee(world, hr, linked_to=suspended)
     pending_emp = employee(world, hr, linked_to=pending)
-    gone_emp = employee(world, hr, status="EXITED", linked_to=pending_gone)
+    gone_emp = employee(world, hr, status="TERMINATED", linked_to=pending_gone)
     body = sync(world, hr, apply=True)
     assert item(body, active_emp)["attention"] == ["EMPLOYEE_ACTIVE_USER_SUSPENDED"]
     assert item(body, pending_emp)["attention"] == ["USER_PENDING_APPROVAL"]
@@ -288,7 +288,7 @@ def test_the_check_says_who_can_get_a_login_and_who_must_be_fixed_first(world):
         )
         conn.execute(
             text(
-                "UPDATE hr.employee SET employment_status = 'EXITED' WHERE employee_id = CAST(:e AS uuid)"
+                "UPDATE hr.employee SET employment_status = 'QUIT' WHERE employee_id = CAST(:e AS uuid)"
             ),
             {"e": left["employeeId"]},
         )
@@ -363,7 +363,7 @@ def test_nothing_is_created_when_the_employee_cannot_have_a_login_or_one_exists(
     with world.engine.begin() as conn:
         conn.execute(
             text(
-                "UPDATE hr.employee SET employment_status = 'INACTIVE' WHERE employee_id = CAST(:e AS uuid)"
+                "UPDATE hr.employee SET employment_status = 'SUSPENDED' WHERE employee_id = CAST(:e AS uuid)"
             ),
             {"e": left["employeeId"]},
         )
@@ -459,7 +459,7 @@ def test_the_counts_for_the_employees_page(world):
     with world.engine.begin() as conn:
         conn.execute(
             text(
-                "UPDATE hr.employee SET employment_status = 'EXITED' WHERE employee_id = CAST(:e AS uuid)"
+                "UPDATE hr.employee SET employment_status = 'QUIT' WHERE employee_id = CAST(:e AS uuid)"
             ),
             {"e": gone["employeeId"]},
         )

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 HR_EMPLOYEE_READ = "hr.employee.read"
 HR_EMPLOYEE_MANAGE = "hr.employee.manage"
+# Approving a change of an employee's status (HR asks, the CEO approves). Held by the CEO role alone.
+HR_EMPLOYEE_STATUS_APPROVE = "hr.employee.status_approve"
 HR_SENSITIVE_READ = "hr.sensitive.read"
 HR_AUDIT_READ = "hr.audit.read"
 HR_SETTINGS_MANAGE = "hr.settings.manage"
@@ -32,6 +34,7 @@ HR_HOUSEKEEPING_MANAGE = "hr.housekeeping.manage"
 ALL_PERMISSIONS: tuple[str, ...] = (
     HR_EMPLOYEE_READ,
     HR_EMPLOYEE_MANAGE,
+    HR_EMPLOYEE_STATUS_APPROVE,
     HR_SENSITIVE_READ,
     HR_AUDIT_READ,
     HR_SETTINGS_MANAGE,

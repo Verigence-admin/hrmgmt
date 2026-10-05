@@ -71,6 +71,8 @@ class UserProvisioner(Protocol):
         self, *, user_id: str, email: str | None = None, mobile: str | None = None
     ) -> ContactChanged: ...
 
+    def sync_employees(self, *, items: list[tuple[str, bool]]) -> list[SyncOutcome]: ...
+
     def list_users(
         self,
         *,
