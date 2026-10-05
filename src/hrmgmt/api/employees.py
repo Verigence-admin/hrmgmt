@@ -704,6 +704,35 @@ def list_employees(
     return {"total": total, "items": items}
 
 
+@router.get("/employees/summary")
+def employee_summary(
+    _: HumanPrincipal = Depends(can_read),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """The numbers for the Employees page: how many people, and how many have a Verigence login."""
+    row = (
+        conn.execute(
+            text(
+                "SELECT count(*) AS total,"
+                " count(*) FILTER (WHERE employment_status = 'ACTIVE') AS active,"
+                " count(*) FILTER (WHERE employment_status = 'ACTIVE'"
+                "                  AND security_user_id IS NOT NULL) AS active_with_login,"
+                " count(*) FILTER (WHERE employment_status = 'ACTIVE'"
+                "                  AND security_user_id IS NULL) AS active_without_login"
+                " FROM hr.employee"
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return {
+        "total": row["total"],
+        "active": row["active"],
+        "activeWithLogin": row["active_with_login"],
+        "activeWithoutLogin": row["active_without_login"],
+    }
+
+
 @router.get("/employees/{employee_id}")
 def get_employee(
     employee_id: str,
