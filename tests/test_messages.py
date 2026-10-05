@@ -19,10 +19,12 @@ class FakeMailer:
         self.sent: list[dict] = []
         self.error: str | None = None
 
-    def send(self, *, to, subject, body):
+    def send(self, *, to, subject, body, html_body=None, images=None):
         if self.error:
             raise MailError(self.error, "x")
-        self.sent.append({"to": to, "subject": subject, "body": body})
+        self.sent.append(
+            {"to": to, "subject": subject, "body": body, "html": html_body, "images": images}
+        )
 
 
 @pytest.fixture()
@@ -309,3 +311,87 @@ def test_a_test_send_goes_to_one_address_with_a_fake_password_and_touches_no_log
         ).status_code
         == 403
     )
+
+
+def test_the_welcome_email_has_a_designed_page_with_pictures_and_everything_is_escaped(world):
+    from hrmgmt.email_html import IMAGES, welcome_html
+
+    page = welcome_html(
+        {
+            "name": "Asha <b>Rao</b>",
+            "company": "Verigence",
+            "login_id": "a&b@example.com",
+            "temp_password": "Xk7@m<Q2>&p",
+            "app_link": "https://example.test/apps?x=1&y=2",
+        }
+    )
+    assert "<b>Rao</b>" not in page and "Asha &lt;b&gt;Rao&lt;/b&gt;" in page
+    assert "Xk7@m&lt;Q2&gt;&amp;p" in page and "a&amp;b@example.com" in page
+    assert 'href="https://example.test/apps?x=1&amp;y=2"' in page
+    for cid in IMAGES:
+        assert f"cid:{cid}" in page
+    assert "Forgot password?" in page and "Resend code" in page
+
+
+def test_a_welcome_test_send_carries_the_page_and_the_pictures_but_a_general_one_does_not(world):
+    keeper = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
+    welcome = world.client.post(
+        "/hr/v1/messages/test",
+        json={"template": "WELCOME", "channel": "EMAIL", "to": "me@example.com"},
+        headers=world.headers(keeper),
+    )
+    assert welcome.status_code == 200, welcome.text
+    sent = world.mailer.sent[-1]
+    assert sent["html"] and "TEST-ONLY-NOT-A-REAL-PASSWORD" in sent["html"]
+    assert len(sent["images"]) == 5
+    world.client.post(
+        "/hr/v1/messages/test",
+        json={"template": "GENERAL", "channel": "EMAIL", "to": "me@example.com"},
+        headers=world.headers(keeper),
+    )
+    assert world.mailer.sent[-1]["html"] is None
+
+
+def test_the_smtp_mailer_builds_a_related_html_part_with_inline_pictures(monkeypatch):
+    from email.message import EmailMessage
+
+    from hrmgmt.mailer import SmtpMailer
+
+    captured: list[EmailMessage] = []
+
+    class FakeSmtp:
+        def __init__(self, host, port, timeout):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def starttls(self, context):
+            pass
+
+        def ehlo(self):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def send_message(self, message):
+            captured.append(message)
+
+    monkeypatch.setattr("hrmgmt.mailer.smtplib.SMTP", FakeSmtp)
+    SmtpMailer(host="h", port=587, user="u", password="p").send(
+        to="a@example.com",
+        subject="s",
+        body="plain",
+        html_body='<img src="cid:pic1">',
+        images={"pic1": b"\x89PNG\r\n\x1a\n"},
+    )
+    message = captured[0]
+    assert message.get_body(("plain",)).get_content().strip() == "plain"
+    html_part = message.get_body(("html",))
+    assert "cid:pic1" in html_part.get_content()
+    related = [p for p in message.walk() if p.get_content_type() == "image/png"]
+    assert len(related) == 1 and related[0]["Content-ID"] == "<pic1>"

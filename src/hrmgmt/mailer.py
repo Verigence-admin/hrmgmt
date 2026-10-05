@@ -24,7 +24,15 @@ class MailError(RuntimeError):
 
 
 class Mailer(Protocol):
-    def send(self, *, to: str, subject: str, body: str) -> None: ...
+    def send(
+        self,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        html_body: str | None = None,
+        images: dict[str, bytes] | None = None,
+    ) -> None: ...
 
 
 def body_to_html(body: str) -> str:
@@ -54,15 +62,29 @@ class SmtpMailer:
         self._from = formataddr((from_name, from_address or user))
         self._timeout = timeout_seconds
 
-    def send(self, *, to: str, subject: str, body: str) -> None:
+    def send(
+        self,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        html_body: str | None = None,
+        images: dict[str, bytes] | None = None,
+    ) -> None:
         message = EmailMessage()
         message["From"] = self._from
         message["To"] = to
         message["Subject"] = subject
         message.set_content(body)
-        message.add_alternative(body_to_html(body), subtype="html")
+        message.add_alternative(html_body if html_body else body_to_html(body), subtype="html")
+        if html_body and images:
+            # The pictures ride inside the email (cid:), so they show where web pictures are blocked.
+            page = message.get_body(("html",))
+            for cid, data in images.items():
+                page.add_related(data, "image", "png", cid=f"<{cid}>")  # type: ignore[union-attr]
         stage = "connect"
         try:
+            server: smtplib.SMTP
             if self._port == 465:
                 # Port 465 is encrypted from the first byte; every other port upgrades with STARTTLS.
                 server = smtplib.SMTP_SSL(

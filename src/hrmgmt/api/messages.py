@@ -13,6 +13,7 @@ from hrmgmt import validators as v
 from hrmgmt.api.employees import _uuid, get_provisioner
 from hrmgmt.audit import record_audit
 from hrmgmt.db import get_conn
+from hrmgmt.email_html import inline_images, welcome_html
 from hrmgmt.errors import ApiError, dependency_unavailable
 from hrmgmt.mailer import Mailer, MailError
 from hrmgmt.passwords import generate_initial_password
@@ -184,6 +185,14 @@ def _wording(conn: Connection, body: SendIn | TestIn) -> tuple[str, str]:
     return subject, text_body
 
 
+def _designed(template: str, values: dict[str, str]) -> dict[str, Any]:
+    """The Welcome email also goes out as a designed page with pictures; the text above it stays
+    as the plain version for mail apps that cannot show a page."""
+    if template != tpl.WELCOME:
+        return {}
+    return {"html_body": welcome_html(values), "images": inline_images()}
+
+
 def _need_provisioner(provisioner: UserProvisioner | None) -> UserProvisioner:
     if provisioner is None:
         raise dependency_unavailable("The login service is not configured.")
@@ -308,6 +317,7 @@ def send(
                 to=person.email,
                 subject=tpl.render(subject, values),
                 body=tpl.render(text_body, values),
+                **_designed(body.template, values),
             )
         except MailError as exc:
             _log(conn, uid, name, body.template, "FAILED", exc.code, user.user_id)
@@ -380,6 +390,7 @@ def send_test(
             to=body.to,
             subject="[TEST] " + tpl.render(subject, values),
             body="This is a test. No login was changed.\n\n" + tpl.render(text_body, values),
+            **_designed(body.template, values),
         )
     except MailError as exc:
         return {"status": "FAILED", "code": exc.code, "message": "The test email did not go."}
