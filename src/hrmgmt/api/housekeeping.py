@@ -248,3 +248,218 @@ def purge(
     if left:
         logger.warning("hr_housekeeping_files_left", kind=scope.kind, files=left)
     return {**_view(scope, counts, None), "filesNotRemoved": left}
+
+
+# ---- delete one employee for good (for people added only to test the system) ----------------
+
+
+class EmployeeScope(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    employee_code: str = Field(min_length=1, max_length=20)
+
+
+class EmployeeDeleteRequest(EmployeeScope):
+    confirm: str = Field(max_length=20)
+
+
+def _employee_by_code(conn: Connection, code: str) -> Any:
+    row = (
+        conn.execute(
+            text(
+                "SELECT employee_id::text AS employee_id, employee_code, full_name,"
+                " employment_status, security_user_id IS NOT NULL AS has_login,"
+                " photo_updated_at IS NOT NULL AS has_photo"
+                " FROM hr.employee WHERE upper(employee_code) = upper(:c)"
+            ),
+            {"c": code},
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        raise ApiError(404, "HR_NOT_FOUND", "No employee has this code.")
+    return row
+
+
+def _employee_counts(conn: Connection, eid: str) -> dict[str, int]:
+    p = {"e": eid}
+    q = "SELECT count(*) FROM hr.{t} WHERE {c} = CAST(:e AS uuid)"
+
+    def n(table: str, column: str = "employee_id") -> int:
+        return _one(conn, q.format(t=table, c=column), p)
+
+    return {
+        "attendanceDays": n("attendance_day"),
+        "attendanceApprovals": n("attendance_exception"),
+        "leaveRequests": n("leave_request"),
+        "leaveLedgerRows": n("leave_ledger"),
+        "claims": n("claim"),
+        "salaryStructures": n("salary_structure"),
+        "supportTickets": n("ticket"),
+        "emailLog": n("message_log"),
+        "qualifications": n("employee_qualification"),
+        "experiences": n("employee_experience"),
+        "statusChanges": n("employee_status_change"),
+    }
+
+
+def _employee_blocks(conn: Connection, eid: str) -> str | None:
+    """Why this person cannot be deleted: money has already moved for them. None when nothing blocks."""
+    p = {"e": eid}
+    month = conn.execute(
+        text(
+            "SELECT to_char(r.pay_month, 'Mon YYYY') FROM hr.payroll_run r WHERE r.run_id IN ("
+            " SELECT run_id FROM hr.payroll_line WHERE employee_id = CAST(:e AS uuid)"
+            " UNION SELECT run_id FROM hr.payslip WHERE employee_id = CAST(:e AS uuid))"
+            " ORDER BY r.pay_month LIMIT 1"
+        ),
+        p,
+    ).first()
+    if month:
+        return (
+            f"This employee is in the payroll for {month[0]}, so the person cannot be deleted. "
+            "Make the person Terminated or Quit instead."
+        )
+    paid = _one(
+        conn,
+        "SELECT count(*) FROM hr.claim WHERE employee_id = CAST(:e AS uuid)"
+        f" AND status IN {_LOCKED_CLAIMS}",
+        p,
+    )
+    if paid:
+        return (
+            "This employee has reimbursements that were handed to payroll or paid, so the person "
+            "cannot be deleted. Make the person Terminated or Quit instead."
+        )
+    return None
+
+
+def _employee_view(row: Any, counts: dict[str, int], blocked: str | None) -> dict[str, Any]:
+    return {
+        "employeeCode": row["employee_code"],
+        "fullName": row["full_name"],
+        "employmentStatus": row["employment_status"],
+        "hasLogin": bool(row["has_login"]),
+        "counts": counts,
+        "blockedBy": blocked,
+        "note": (
+            "The Verigence login is not deleted here. If it was made for a test, "
+            "delete it from Users."
+            if row["has_login"]
+            else None
+        ),
+    }
+
+
+@router.post("/employee/preview")
+def employee_preview(
+    body: EmployeeScope,
+    _: HumanPrincipal = Depends(can_clean),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """What deleting this employee would remove. Changes nothing."""
+    row = _employee_by_code(conn, body.employee_code)
+    return _employee_view(
+        row, _employee_counts(conn, row["employee_id"]), _employee_blocks(conn, row["employee_id"])
+    )
+
+
+def _delete_employee(conn: Connection, eid: str, has_photo: bool) -> list[str]:
+    """Deletes the person and everything of theirs, inside the caller's transaction; returns the
+    stored files to remove afterwards. The audit history is append-only and stays."""
+    p = {"e": eid}
+    where = "employee_id = CAST(:e AS uuid)"
+    keys: list[str] = []
+    for pair in conn.execute(
+        text(
+            f"SELECT check_in_photo_key, check_out_photo_key FROM hr.attendance_day WHERE {where}"
+        ),
+        p,
+    ):
+        keys += [k for k in pair if k]
+    conn.execute(text(f"DELETE FROM hr.attendance_exception WHERE {where}"), p)
+    conn.execute(text(f"DELETE FROM hr.attendance_day WHERE {where}"), p)
+    conn.execute(text(f"DELETE FROM hr.capture_token WHERE {where}"), p)
+
+    # The ledger only allows this delete when the transaction says it is a purge.
+    conn.execute(text("SET LOCAL hr.allow_ledger_purge = 'on'"))
+    conn.execute(text(f"DELETE FROM hr.leave_ledger WHERE {where}"), p)
+    conn.execute(text("SET LOCAL hr.allow_ledger_purge = 'off'"))
+    conn.execute(text(f"DELETE FROM hr.leave_request WHERE {where}"), p)
+
+    mine_claims = f"SELECT claim_id FROM hr.claim WHERE {where}"
+    keys += [
+        r[0]
+        for r in conn.execute(
+            text(f"SELECT file_key FROM hr.claim_receipt WHERE claim_id IN ({mine_claims})"), p
+        )
+    ]
+    conn.execute(text(f"DELETE FROM hr.claim_receipt WHERE claim_id IN ({mine_claims})"), p)
+    conn.execute(text(f"DELETE FROM hr.claim_event WHERE claim_id IN ({mine_claims})"), p)
+    conn.execute(text(f"DELETE FROM hr.claim WHERE {where}"), p)
+
+    mine_tickets = f"SELECT ticket_id FROM hr.ticket WHERE {where}"
+    keys += [
+        r[0]
+        for r in conn.execute(
+            text(f"SELECT file_key FROM hr.ticket_file WHERE ticket_id IN ({mine_tickets})"), p
+        )
+    ]
+    conn.execute(text(f"DELETE FROM hr.ticket_file WHERE ticket_id IN ({mine_tickets})"), p)
+    conn.execute(text(f"DELETE FROM hr.ticket_message WHERE ticket_id IN ({mine_tickets})"), p)
+    conn.execute(text(f"DELETE FROM hr.ticket WHERE {where}"), p)
+
+    for table in (
+        "salary_structure",
+        "employee_qualification",
+        "employee_experience",
+        "employee_sensitive",
+        "employee_status_change",
+        "message_log",
+    ):
+        conn.execute(text(f"DELETE FROM hr.{table} WHERE {where}"), p)
+    conn.execute(text(f"DELETE FROM hr.employee WHERE {where}"), p)
+    if has_photo:
+        keys.append(f"employee/{eid}/photo.jpg")
+    return keys
+
+
+@router.post("/employee/delete")
+def employee_delete(
+    body: EmployeeDeleteRequest,
+    request: Request,
+    user: HumanPrincipal = Depends(can_clean),
+    storage: ObjectStorage | None = Depends(get_storage),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Deletes one employee and all their records for good. Needs the word DELETE typed. Refused
+    when a payroll or a paid reimbursement already used them. SuperAdmin only."""
+    if body.confirm != "DELETE":
+        raise ApiError(422, "HOUSEKEEPING_NOT_CONFIRMED", "Type DELETE to confirm.")
+    row = _employee_by_code(conn, body.employee_code)
+    eid = row["employee_id"]
+    blocked = _employee_blocks(conn, eid)
+    if blocked:
+        raise ApiError(409, "HOUSEKEEPING_EMPLOYEE_IN_PAYROLL", blocked)
+    counts = _employee_counts(conn, eid)
+    keys = _delete_employee(conn, eid, bool(row["has_photo"]))
+    record_audit(
+        conn,
+        actor_user_id=user.user_id,
+        action="EMPLOYEE_HARD_DELETED",
+        entity_type="employee",
+        entity_id=eid,
+        changes={
+            "employeeCode": row["employee_code"],
+            "fullName": row["full_name"],
+            "hadLogin": bool(row["has_login"]),
+            "counts": counts,
+        },
+        request=request,
+    )
+    # The records are gone for good before their files are touched.
+    conn.commit()
+    left = _remove_files(storage, keys)
+    if left:
+        logger.warning("hr_housekeeping_files_left", kind="EMPLOYEE", files=left)
+    return {**_employee_view(row, counts, None), "deleted": True, "filesNotRemoved": left}
