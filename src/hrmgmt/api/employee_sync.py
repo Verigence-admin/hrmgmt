@@ -121,7 +121,8 @@ def _plan(
             (e["personal_email"] or "").strip().lower(),
             (e["secondary_email"] or "").strip().lower(),
         }
-        email_differs = bool(user.email) and user.email.strip().lower() not in known_emails
+        login_email = (user.email or "").strip().lower()
+        email_differs = bool(login_email) and login_email not in known_emails
         items.append(
             {
                 "employeeId": eid,
