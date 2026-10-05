@@ -114,7 +114,7 @@ def test_daily_view_carries_the_photo_flags_and_the_reason_for_being_away(world)
     assert row["hasCheckInPhoto"] is True and row["hasCheckOutPhoto"] is False
     away = [d for d in row["delinquencies"] if d["code"] == "OUT_OF_FENCE"]
     assert away and away[0]["reason"] == "Visiting the other showroom"
-    assert away[0]["label"] == "Not in tagged location"
+    assert away[0]["label"] == "Not in tagged location at check-in"
     # a day with no check-in has no photo and no attendance record
     other, other_user = _person(world, admin)
     world.assign(other_user, "PC", outlet=OUTLET)

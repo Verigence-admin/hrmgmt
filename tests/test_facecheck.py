@@ -91,8 +91,87 @@ def test_a_photo_without_a_face_is_accepted_but_flagged_for_hr(migrated_engine, 
     ).json()
     mine = [r for r in daily["rows"] if r["employeeCode"] == emp["employeeCode"]][0]
     assert [d["code"] for d in mine["delinquencies"]] == ["NO_FACE"]
-    assert mine["delinquencies"][0]["label"] == "No face found in the photo"
+    assert mine["delinquencies"][0]["label"] == "No face found in the check-in photo"
     assert mine["status"] == "CHECKED_IN"  # nothing waits for approval
+
+
+def test_the_flag_says_which_photo_it_is_for(migrated_engine, monkeypatch):
+    world = World(migrated_engine, now=ist(2026, 10, 5, 10, 0))
+    world.clean_assignments()
+    with migrated_engine.begin() as conn:
+        for table in ("attendance_exception", "attendance_day", "capture_token"):
+            conn.execute(text(f"DELETE FROM hr.{table}"))
+    hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
+    keeper = world.grant(str(uuid.uuid4()), perm.HR_ATTENDANCE_READ_ALL)
+    only_out, out_user = world.employee(hr)
+    only_in, in_user = world.employee(hr)
+    both, both_user = world.employee(hr)
+    for user in (out_user, in_user, both_user):
+        world.assign(user, "PC", outlet=OUTLET)
+    faces = {"in": {in_user: False, both_user: False}, "out": {out_user: False, both_user: False}}
+    current: dict[str, object] = {}
+    monkeypatch.setattr(
+        "hrmgmt.api.attendance.face_present",
+        lambda image: faces[current["event"]].get(current["user"], True),
+    )
+
+    def punch(user: str, event: str, purpose: str):
+        current.update(user=user, event=event)
+        return send(world, user, event, token(world, user, purpose), where=NEAR)
+
+    for user in (out_user, in_user, both_user):
+        assert punch(user, "in", "CHECK_IN").status_code == 200
+    world.clock.set(ist(2026, 10, 5, 18, 30))
+    for user in (out_user, in_user, both_user):
+        assert punch(user, "out", "CHECK_OUT").status_code == 200
+
+    rows = {
+        r["employeeCode"]: r
+        for r in world.client.get(
+            "/hr/v1/attendance/daily", params={"date": "2026-10-05"}, headers=world.headers(keeper)
+        ).json()["rows"]
+    }
+    seen = {
+        name: [(d["label"], d["side"]) for d in rows[e["employeeCode"]]["delinquencies"]]
+        for name, e in (("out", only_out), ("in", only_in), ("both", both))
+    }
+    assert seen == {
+        "out": [("No face found in the check-out photo", "CHECK_OUT")],
+        "in": [("No face found in the check-in photo", "CHECK_IN")],
+        "both": [
+            ("No face found in the check-in photo", "CHECK_IN"),
+            ("No face found in the check-out photo", "CHECK_OUT"),
+        ],
+    }
+    # the same wording reaches the Excel report
+    world.clock.set(ist(2026, 10, 6, 11, 0))
+    report = world.client.get(
+        "/hr/v1/attendance/report",
+        params={"from": "2026-10-05", "to": "2026-10-05"},
+        headers=world.headers(keeper),
+    )
+    import io
+
+    from openpyxl import load_workbook
+
+    book = load_workbook(io.BytesIO(report.content))
+    texts = {
+        row[1]: row[14]
+        for row in book["Attendance"].iter_rows(min_row=2, values_only=True)
+        if row[1] in {only_out["employeeCode"], only_in["employeeCode"], both["employeeCode"]}
+    }
+    assert texts[only_out["employeeCode"]] == "No face found in the check-out photo"
+    assert texts[only_in["employeeCode"]] == "No face found in the check-in photo"
+    assert (
+        "check-in photo" in texts[both["employeeCode"]]
+        and "check-out photo" in texts[both["employeeCode"]]
+    )
+    listed = [
+        (r[4], r[0 + 1])
+        for r in book["Delinquencies"].iter_rows(min_row=2, values_only=True)
+        if r[1] == only_out["employeeCode"]
+    ]
+    assert listed == [("No face found in the check-out photo", only_out["employeeCode"])]
 
 
 def test_when_the_check_cannot_run_nothing_is_flagged(migrated_engine, monkeypatch):
