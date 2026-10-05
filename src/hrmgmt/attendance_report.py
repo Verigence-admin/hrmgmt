@@ -47,6 +47,9 @@ class Row:
     check_out_outlet: str | None = None
     check_in_distance_m: float | None = None
     check_out_distance_m: float | None = None
+    # True: outside the tagged location. False: inside it. None: not applicable (see _out_of_fence).
+    check_in_out_of_fence: bool | None = None
+    check_out_out_of_fence: bool | None = None
     attendance_id: str | None = None
     has_check_in_photo: bool = False
     has_check_out_photo: bool = False
@@ -57,6 +60,18 @@ class Row:
         if self.check_in_at and self.check_out_at:
             return round((self.check_out_at - self.check_in_at).total_seconds() / 3600, 1)
         return None
+
+
+def _out_of_fence(record: Any, side: str) -> bool | None:
+    """Whether this check-in or check-out was outside the tagged location, read from what was stored at
+    the time. Only for someone the fence applies to and only when their outlet had a location on file;
+    for everyone else there is nothing to say, so None (never False)."""
+    if not record["geofenced"] or record[f"check_{side}_at"] is None:
+        return None
+    flags = record[f"check_{side}_flags"] or []
+    if record[f"check_{side}_outlet_id"] is None or "NO_OUTLET_LOCATION" in flags:
+        return None
+    return "OUT_OF_FENCE" in flags
 
 
 def _bounds(day: date) -> tuple[datetime, datetime]:
@@ -227,6 +242,7 @@ def _row(
     for side in ("in", "out"):
         value = record[f"check_{side}_distance_m"]
         setattr(row, f"check_{side}_distance_m", float(value) if value is not None else None)
+        setattr(row, f"check_{side}_out_of_fence", _out_of_fence(record, side))
     found = exceptions.get(str(record["attendance_id"]), [])
     row.delinquencies.extend(
         {"code": e["kind"], "status": e["status"], "reason": e["reason"]} for e in found
@@ -266,6 +282,8 @@ def row_view(row: Row) -> dict[str, Any]:
         "checkOutOutlet": row.check_out_outlet,
         "checkInDistanceM": row.check_in_distance_m,
         "checkOutDistanceM": row.check_out_distance_m,
+        "checkInOutOfFence": row.check_in_out_of_fence,
+        "checkOutOutOfFence": row.check_out_out_of_fence,
         "hoursWorked": row.hours,
         "attendanceId": row.attendance_id,
         "hasCheckInPhoto": row.has_check_in_photo,

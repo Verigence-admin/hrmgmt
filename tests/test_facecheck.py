@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
-from PIL import Image
+import numpy as np
+from PIL import Image, ImageDraw, ImageEnhance
 from sqlalchemy import text
 
 from hrmgmt import permissions as perm
@@ -10,9 +12,39 @@ from hrmgmt.facecheck import face_present
 from tests.support import NEAR, OUTLET, World, ist
 from tests.test_attendance import send, token
 
+# A public-domain NASA portrait (scikit-image's "astronaut"), only to prove the detector works at all.
+_FACE = Path(__file__).parent / "fixtures" / "face_public_domain.jpg"
+
 
 def test_a_plain_picture_has_no_face():
     assert face_present(Image.new("RGB", (640, 480), (120, 160, 200))) is False
+
+
+def test_a_real_face_is_found_even_when_dim_tilted_or_small():
+    face = Image.open(_FACE).convert("RGB")
+    assert face_present(face) is True
+    assert face_present(ImageEnhance.Brightness(face).enhance(0.6)) is True
+    assert face_present(face.rotate(8, fillcolor=(128, 128, 128))) is True
+    canvas = Image.new("RGB", (640, 480), (150, 150, 150))  # the same face, farther from the camera
+    canvas.paste(face.resize((240, 240)), (200, 120))
+    assert face_present(canvas) is True
+
+
+def test_a_ceiling_a_wall_and_noise_have_no_face():
+    ceiling = Image.new("RGB", (640, 480), (225, 225, 220))
+    draw = ImageDraw.Draw(ceiling)
+    draw.ellipse(
+        (250, 120, 370, 240), fill=(250, 250, 245), outline=(190, 190, 185), width=6
+    )  # a ceiling light
+    draw.ellipse((470, 40, 510, 80), fill=(150, 150, 150))  # a smoke detector
+    noise = Image.fromarray(
+        np.random.default_rng(7).integers(0, 255, (480, 640, 3), dtype=np.uint8)
+    )
+    stripes = Image.fromarray(np.tile(np.arange(640) % 40 * 6, (480, 1)).astype(np.uint8)).convert(
+        "RGB"
+    )
+    for picture in (ceiling, noise, stripes):
+        assert face_present(picture) is False
 
 
 def test_a_photo_without_a_face_is_accepted_but_flagged_for_hr(migrated_engine, monkeypatch):

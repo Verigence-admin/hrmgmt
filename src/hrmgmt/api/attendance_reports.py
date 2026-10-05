@@ -89,6 +89,11 @@ def _time(moment: Any) -> str | None:
     return to_ist(moment).strftime("%H:%M") if moment else None
 
 
+def _yes_no(value: bool | None) -> str | None:
+    """Yes or No; an empty cell when the fence does not apply to this person or this day."""
+    return None if value is None else ("Yes" if value else "No")
+
+
 def _delinquency_text(row: Row) -> str:
     return "; ".join(
         DELINQUENCY_LABELS[d["code"]] + (f" ({d['status'].lower()})" if d["status"] else "")
@@ -141,6 +146,8 @@ def attendance_report(
             "Check-out outlet",
             "Check-out distance (m)",
             "Delinquencies",
+            "Check-in out of fence",
+            "Check-out out of fence",
         ]
     )
     for r in rows:
@@ -161,6 +168,8 @@ def attendance_report(
                 _text(r.check_out_outlet),
                 r.check_out_distance_m,
                 _delinquency_text(r),
+                _yes_no(r.check_in_out_of_fence),
+                _yes_no(r.check_out_out_of_fence),
             ]
         )
     late = book.create_sheet("Delinquencies")

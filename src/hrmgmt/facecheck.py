@@ -22,7 +22,9 @@ def _detector() -> Any | None:
     try:
         import cv2
 
-        found = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        # "alt2" finds real selfies (tilted, dim, backlit) far more reliably than the default one, and it
+        # does not mistake ceilings or round objects for faces.
+        found = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_alt2.xml")
         return None if found.empty() else found
     except Exception:
         logger.warning("hr_face_check_unavailable")
@@ -35,19 +37,22 @@ def face_present(photo: Image.Image) -> bool | None:
     if detector is None:
         return None
     try:
+        import cv2
         import numpy as np
 
         small = ImageOps.grayscale(photo)
         small.thumbnail((_CHECK_SIDE, _CHECK_SIDE))
         grey = np.asarray(small)
-        import cv2
-
-        grey = cv2.equalizeHist(grey)
         least = max(24, int(min(grey.shape[:2]) * _MIN_FACE_SHARE))
-        faces = detector.detectMultiScale(
-            grey, scaleFactor=1.1, minNeighbors=4, minSize=(least, least)
-        )
-        return len(faces) > 0
+        # Local contrast first (handles a face in shadow against a bright window), then the plain
+        # picture. The first pass that finds a face is enough, so a normal photo costs one pass.
+        for prepared in (cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(grey), grey):
+            faces = detector.detectMultiScale(
+                prepared, scaleFactor=1.1, minNeighbors=4, minSize=(least, least)
+            )
+            if len(faces) > 0:
+                return True
+        return False
     except Exception:
         logger.warning("hr_face_check_failed")
         return None

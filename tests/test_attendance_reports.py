@@ -451,3 +451,95 @@ def test_folding_repeated_rows_keeps_the_first_start_and_the_last_end():
     )
     [live] = collapse_project_history([row(-30, -10), row(-10, None)], now)
     assert live["current"] is True and live["until"] is None
+
+
+def test_each_row_says_whether_a_check_in_or_out_was_outside_the_tagged_location(
+    world, migrated_engine
+):
+    admin, keeper = _hr(world)
+    inside, inside_user = _person(world, admin)
+    outside, outside_user = _person(world, admin)
+    no_outlet_position, no_position_user = _person(world, admin)
+    lead, lead_user = _person(world, admin)
+    absent, absent_user = _person(world, admin)
+    world.assign(inside_user, "PC", outlet=OUTLET)
+    world.assign(outside_user, "PC", outlet=OUTLET)
+    world.assign(no_position_user, "PC", outlet=("No-GPS Motors", None, None))
+    world.assign(lead_user, "TL", outlet=OUTLET)
+    world.assign(absent_user, "PC", outlet=OUTLET)
+
+    send(world, inside_user, "in", token(world, inside_user), where=NEAR)
+    send(
+        world,
+        outside_user,
+        "in",
+        token(world, outside_user),
+        where=FAR,
+        reason="At the other showroom",
+    )
+    send(world, no_position_user, "in", token(world, no_position_user), where=NEAR)
+    send(world, lead_user, "in", token(world, lead_user), where=FAR)
+    world.clock.set(ist(2026, 10, 5, 18, 30))
+    send(
+        world,
+        inside_user,
+        "out",
+        token(world, inside_user, "CHECK_OUT"),
+        where=FAR,
+        reason="Delivery",
+    )
+
+    rows = _rows(world, keeper, "2026-10-05")
+    seen = {
+        name: (
+            rows[e["employeeCode"]][0]["checkInOutOfFence"],
+            rows[e["employeeCode"]][0]["checkOutOutOfFence"],
+        )
+        for name, e in (
+            ("inside", inside),
+            ("outside", outside),
+            ("no position", no_outlet_position),
+            ("lead", lead),
+            ("absent", absent),
+        )
+    }
+    assert seen == {
+        "inside": (False, True),  # in at the outlet, out somewhere else
+        "outside": (True, None),  # in away from it; no check-out yet
+        "no position": (None, None),  # the outlet has no location on file: nothing to say
+        "lead": (None, None),  # the fence does not apply to a Team Lead
+        "absent": (None, None),  # no punch
+    }
+
+    # the same values reach the Excel report, in two new columns at the far right
+    world.clock.set(ist(2026, 10, 6, 11, 0))
+    r = world.client.get(
+        "/hr/v1/attendance/report",
+        params={"from": "2026-10-05", "to": "2026-10-05"},
+        headers=world.headers(keeper),
+    )
+    sheet = load_workbook(io.BytesIO(r.content))["Attendance"]
+    header = [c.value for c in sheet[1]]
+    assert header[-2:] == ["Check-in out of fence", "Check-out out of fence"]
+    assert header[:15] == [
+        "Date",
+        "Employee ID",
+        "Name",
+        "Project",
+        "Role",
+        "Assigned outlets",
+        "Status",
+        "Check-in",
+        "Check-out",
+        "Hours",
+        "Check-in outlet",
+        "Check-in distance (m)",
+        "Check-out outlet",
+        "Check-out distance (m)",
+        "Delinquencies",
+    ]  # nothing that was already there has moved
+    cells = {row[1]: row[-2:] for row in sheet.iter_rows(min_row=2, values_only=True)}
+    assert cells[inside["employeeCode"]] == ("No", "Yes")
+    assert cells[outside["employeeCode"]] == ("Yes", None)
+    assert cells[no_outlet_position["employeeCode"]] == (None, None)
+    assert cells[lead["employeeCode"]] == (None, None)
