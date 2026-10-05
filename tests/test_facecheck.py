@@ -26,8 +26,33 @@ def test_a_real_face_is_found_even_when_dim_tilted_or_small():
     assert face_present(ImageEnhance.Brightness(face).enhance(0.6)) is True
     assert face_present(face.rotate(8, fillcolor=(128, 128, 128))) is True
     canvas = Image.new("RGB", (640, 480), (150, 150, 150))  # the same face, farther from the camera
-    canvas.paste(face.resize((240, 240)), (200, 120))
+    canvas.paste(face.resize((300, 300)), (170, 90))
     assert face_present(canvas) is True
+
+
+def test_a_tilted_or_partly_cut_off_face_is_still_a_face():
+    # What the older detector alone missed: a face tilted well over, and one half out of the frame.
+    face = Image.open(_FACE).convert("RGB")
+    width, height = face.size
+    assert face_present(face.rotate(-20, fillcolor=(128, 128, 128))) is True
+    assert face_present(face.crop((int(width * 0.38), 0, width, height))) is True
+    assert face_present(face.crop((int(width * 0.45), 0, width, height))) is True
+
+
+def test_if_the_new_detector_is_missing_the_older_one_still_runs(monkeypatch):
+    from hrmgmt import facecheck
+
+    monkeypatch.setattr(facecheck, "_yunet_ready", lambda: False)
+    assert face_present(Image.open(_FACE).convert("RGB")) is True
+    assert face_present(Image.new("RGB", (640, 480), (120, 160, 200))) is False
+
+
+def test_if_no_detector_can_run_nothing_is_flagged(monkeypatch):
+    from hrmgmt import facecheck
+
+    monkeypatch.setattr(facecheck, "_yunet_ready", lambda: False)
+    monkeypatch.setattr(facecheck, "_detector", lambda: None)
+    assert face_present(Image.new("RGB", (640, 480), (120, 160, 200))) is None
 
 
 def test_a_ceiling_a_wall_and_noise_have_no_face():
