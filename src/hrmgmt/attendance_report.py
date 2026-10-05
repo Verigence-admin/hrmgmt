@@ -74,6 +74,11 @@ class Row:
     # True: outside the tagged location. False: inside it. None: not applicable (see _out_of_fence).
     check_in_out_of_fence: bool | None = None
     check_out_out_of_fence: bool | None = None
+    # How closely the face matched (1 is identical) and what it was compared with. Shown to HR only.
+    check_in_face_score: float | None = None
+    check_out_face_score: float | None = None
+    check_in_face_ref: str | None = None
+    check_out_face_ref: str | None = None
     attendance_id: str | None = None
     has_check_in_photo: bool = False
     has_check_out_photo: bool = False
@@ -272,6 +277,9 @@ def _row(
         value = record[f"check_{side}_distance_m"]
         setattr(row, f"check_{side}_distance_m", float(value) if value is not None else None)
         setattr(row, f"check_{side}_out_of_fence", _out_of_fence(record, side))
+        score = record[f"check_{side}_face_score"]
+        setattr(row, f"check_{side}_face_score", float(score) if score is not None else None)
+        setattr(row, f"check_{side}_face_ref", record[f"check_{side}_face_ref"])
     found = exceptions.get(str(record["attendance_id"]), [])
     row.delinquencies.extend(
         {"code": e["kind"], "status": e["status"], "reason": e["reason"], "side": e["side"]}
@@ -321,6 +329,10 @@ def row_view(row: Row) -> dict[str, Any]:
         "checkOutOutlet": row.check_out_outlet,
         "checkInDistanceM": row.check_in_distance_m,
         "checkOutDistanceM": row.check_out_distance_m,
+        "checkInFaceScore": row.check_in_face_score,
+        "checkInFaceRef": row.check_in_face_ref,
+        "checkOutFaceScore": row.check_out_face_score,
+        "checkOutFaceRef": row.check_out_face_ref,
         "checkInOutOfFence": row.check_in_out_of_fence,
         "checkOutOutOfFence": row.check_out_out_of_fence,
         "hoursWorked": row.hours,

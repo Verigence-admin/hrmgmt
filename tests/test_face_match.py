@@ -338,3 +338,24 @@ def test_the_face_numbers_go_with_the_employee_when_they_are_deleted(world):
             ).scalar_one()
             == 0
         )
+
+
+def test_hr_sees_the_score_and_what_it_was_compared_with_but_not_the_employee(world):
+    hr, emp, user = person(world)
+    set_profile_photo(world, hr, emp)
+    punch(world, user, "in")
+    world.clock.set(ist(2026, 10, 5, 18, 30))
+    punch(world, user, "out")
+    rows = world.client.get(
+        "/hr/v1/attendance/daily",
+        params={"date": "2026-10-05"},
+        headers=world.headers(keeper(world)),
+    ).json()["rows"]
+    mine = next(r for r in rows if r["employeeCode"] == emp["employeeCode"])
+    assert mine["checkInFaceRef"] == "PROFILE" and mine["checkOutFaceRef"] == "PROFILE"
+    assert mine["checkInFaceScore"] > 0.9 and mine["checkOutFaceScore"] > 0.9
+    # the employee's own screens carry no score
+    own = world.client.get("/hr/v1/attendance/today", headers=world.headers(user)).text
+    assert "FaceScore" not in own and "face_score" not in own
+    # someone who has not checked in has no score
+    assert all(r["checkInFaceScore"] is None for r in rows if r["checkInAt"] is None)
