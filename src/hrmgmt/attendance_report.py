@@ -27,6 +27,24 @@ DELINQUENCY_LABELS = {
     "NO_FACE": "No face found in the photo",
     "OFF_DAY_WORK": "Worked on an off day",
 }
+# These three belong to one punch, so they say which: "No face found in the check-out photo".
+_PER_PUNCH = {
+    "OUT_OF_FENCE": "Not in tagged location at {side}",
+    "NO_OUTLET_LOCATION": "No outlet location on file at {side}",
+    "NO_FACE": "No face found in the {side} photo",
+}
+_SIDE_WORDS = {"in": "check-in", "out": "check-out"}
+
+
+def delinquency_label(delinquency: dict[str, Any]) -> str:
+    """The wording HR reads, on screen and in Excel. Names the punch when there is one."""
+    code = delinquency["code"]
+    side = delinquency.get("side")
+    if side in _SIDE_WORDS and code in _PER_PUNCH:
+        return _PER_PUNCH[code].format(side=_SIDE_WORDS[side])
+    return DELINQUENCY_LABELS[code]
+
+
 _NO_PROJECT = {"projectCode": None, "projectName": None, "roles": [], "outlets": []}
 
 
@@ -118,13 +136,18 @@ def build_rows(
     exceptions: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in conn.execute(
         text(
-            "SELECT attendance_id, kind, status, reason FROM hr.attendance_exception"
+            "SELECT attendance_id, kind, status, reason, event FROM hr.attendance_exception"
             " WHERE work_date >= :a AND work_date <= :b ORDER BY created_at"
         ),
         params,
     ).mappings():
         exceptions[str(r["attendance_id"])].append(
-            {"kind": r["kind"], "status": r["status"], "reason": r["reason"]}
+            {
+                "kind": r["kind"],
+                "status": r["status"],
+                "reason": r["reason"],
+                "side": "in" if r["event"] == "CHECK_IN" else "out",
+            }
         )
     leave = [
         (str(r["employee_id"]), r["from_date"], r["to_date"])
@@ -245,13 +268,17 @@ def _row(
         setattr(row, f"check_{side}_out_of_fence", _out_of_fence(record, side))
     found = exceptions.get(str(record["attendance_id"]), [])
     row.delinquencies.extend(
-        {"code": e["kind"], "status": e["status"], "reason": e["reason"]} for e in found
+        {"code": e["kind"], "status": e["status"], "reason": e["reason"], "side": e["side"]}
+        for e in found
     )
-    flagged = {*(record["check_in_flags"] or []), *(record["check_out_flags"] or [])}
-    for code in ("NO_OUTLET_LOCATION", "NO_FACE"):
-        # Not for anyone to approve: HR fixes the outlet, or looks at the photo.
-        if code in flagged and not any(e["kind"] == code for e in found):
-            row.delinquencies.append({"code": code, "status": None, "reason": None})
+    for side in ("in", "out"):
+        flags = record[f"check_{side}_flags"] or []
+        for code in ("NO_OUTLET_LOCATION", "NO_FACE"):
+            # Not for anyone to approve: HR fixes the outlet, or looks at the photo.
+            if code in flags and not any(e["kind"] == code and e["side"] == side for e in found):
+                row.delinquencies.append(
+                    {"code": code, "status": None, "reason": None, "side": side}
+                )
     if record["check_out_at"] is None and past:
         row.delinquencies.append({"code": "MISSING_CHECK_OUT", "status": None})
     if any(e["status"] == "PENDING" for e in found):
@@ -291,7 +318,8 @@ def row_view(row: Row) -> dict[str, Any]:
         "delinquencies": [
             {
                 "code": d["code"],
-                "label": DELINQUENCY_LABELS[d["code"]],
+                "label": delinquency_label(d),
+                "side": {"in": "CHECK_IN", "out": "CHECK_OUT"}.get(d.get("side")),
                 "decision": d["status"],
                 "reason": d.get("reason"),
             }

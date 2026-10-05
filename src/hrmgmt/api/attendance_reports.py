@@ -14,7 +14,7 @@ from sqlalchemy import Connection, text
 from hrmgmt import permissions as perm
 from hrmgmt import workcontext as wc
 from hrmgmt.api.attendance import day_kind, get_clock
-from hrmgmt.attendance_report import DELINQUENCY_LABELS, MAX_RANGE_DAYS, Row, build_rows, row_view
+from hrmgmt.attendance_report import MAX_RANGE_DAYS, Row, build_rows, delinquency_label, row_view
 from hrmgmt.audit import record_audit
 from hrmgmt.db import get_conn
 from hrmgmt.errors import ApiError
@@ -96,7 +96,7 @@ def _yes_no(value: bool | None) -> str | None:
 
 def _delinquency_text(row: Row) -> str:
     return "; ".join(
-        DELINQUENCY_LABELS[d["code"]] + (f" ({d['status'].lower()})" if d["status"] else "")
+        delinquency_label(d) + (f" ({d['status'].lower()})" if d["status"] else "")
         for d in row.delinquencies
     )
 
@@ -182,7 +182,7 @@ def attendance_report(
                     _text(r.employee_code),
                     _text(r.employee_name),
                     _text(r.project_name or "No project"),
-                    DELINQUENCY_LABELS[d["code"]],
+                    delinquency_label(d),
                     d["status"].title() if d["status"] else "",
                     _text(d.get("reason")),
                 ]
