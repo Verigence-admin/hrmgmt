@@ -355,8 +355,12 @@ def test_the_employee_list_names_each_persons_current_projects(world):
         tenant="tenant-b",
         project=("P2", "Project Two"),
     )
-    body = world.client.get("/hr/v1/employees", headers=world.headers(keeper)).json()
-    people = {e["employeeCode"]: e for e in body["items"]}
+    people = {}
+    for code in (emp["employeeCode"], lone["employeeCode"]):  # by code: the full list is paged
+        body = world.client.get(
+            "/hr/v1/employees", params={"q": code}, headers=world.headers(keeper)
+        ).json()
+        people.update({e["employeeCode"]: e for e in body["items"]})
     assert people[emp["employeeCode"]]["projects"] == ["Project One", "Project Two"]
     assert people[lone["employeeCode"]]["projects"] == []
 

@@ -250,6 +250,15 @@ def no_login_employee(world, hr, **over):
     return emp
 
 
+def share_mobile(world, first, second):
+    """Old data can hold the same mobile twice (the API no longer allows it): set it up directly."""
+    with world.engine.begin() as conn:
+        conn.execute(
+            text("UPDATE hr.employee SET mobile = :m WHERE employee_id = CAST(:e AS uuid)"),
+            {"m": first["mobile"], "e": second["employeeId"]},
+        )
+
+
 def create(world, hr, *emps):
     r = world.client.post(
         "/hr/v1/employees/sync-users/create",
@@ -268,8 +277,8 @@ def test_the_check_says_who_can_get_a_login_and_who_must_be_fixed_first(world):
     hr = hr_user(world)
     ready = no_login_employee(world, hr)
     no_mobile = no_login_employee(world, hr)
-    shared_a = no_login_employee(world, hr, mobile="9123456780")
-    no_login_employee(world, hr, mobile="9123456780")
+    shared_a = no_login_employee(world, hr)
+    share_mobile(world, shared_a, no_login_employee(world, hr))
     left = no_login_employee(world, hr)
     refused = no_login_employee(world, hr)
     with world.engine.begin() as conn:
@@ -347,8 +356,9 @@ def test_nothing_is_created_when_the_employee_cannot_have_a_login_or_one_exists(
     creator = Creator(world)
     left = no_login_employee(world, hr)
     no_mobile = no_login_employee(world, hr)
-    a = no_login_employee(world, hr, mobile="9123456781")
-    b = no_login_employee(world, hr, mobile="9123456781")
+    a = no_login_employee(world, hr)
+    b = no_login_employee(world, hr)
+    share_mobile(world, a, b)
     known = no_login_employee(world, hr)
     with world.engine.begin() as conn:
         conn.execute(

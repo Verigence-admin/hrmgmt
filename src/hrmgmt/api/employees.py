@@ -355,6 +355,33 @@ def _fetch(conn: Connection, employee_id: str) -> Any:
     return row
 
 
+def _mobile_in_use(conn: Connection, mobile: str, *, except_id: str | None = None) -> bool:
+    """Another employee already has this mobile number (each employee's mobile is their own)."""
+    return (
+        conn.execute(
+            text(
+                "SELECT 1 FROM hr.employee WHERE mobile = :m"
+                " AND (CAST(:id AS uuid) IS NULL OR employee_id <> CAST(:id AS uuid)) LIMIT 1"
+            ),
+            {"m": mobile, "id": except_id},
+        ).first()
+        is not None
+    )
+
+
+def _email_in_use(conn: Connection, email: str, *, except_id: str) -> bool:
+    return (
+        conn.execute(
+            text(
+                "SELECT 1 FROM hr.employee WHERE lower(personal_email) = lower(:e)"
+                " AND employee_id <> CAST(:id AS uuid) LIMIT 1"
+            ),
+            {"e": email, "id": except_id},
+        ).first()
+        is not None
+    )
+
+
 def get_provisioner(request: Request) -> UserProvisioner | None:
     return getattr(request.app.state, "provisioner", None)
 
@@ -441,6 +468,10 @@ def create_employee_record(
     """Create one employee and, when asked, their Verigence login. A login problem never loses
     the employee: the record is kept and HR sees why the login is pending. Shared by the single
     "Add employee" call and the spreadsheet import so both behave identically."""
+    if body.mobile and _mobile_in_use(conn, body.mobile):
+        raise conflict(
+            "EMPLOYEE_MOBILE_EXISTS", "This mobile number already belongs to another employee."
+        )
     try:
         employee_id = str(
             conn.execute(
@@ -742,12 +773,93 @@ def get_employee(
     return _detail(conn, _uuid(employee_id))
 
 
+def _change_login_contact(
+    conn: Connection,
+    *,
+    employee_id: str,
+    before: Any,
+    column_updates: dict[str, Any],
+    actor: str,
+    provisioner: UserProvisioner | None,
+    request: Request,
+) -> bool:
+    """When HR changes an employee's email or mobile: refuse a duplicate, and when the employee has
+    a Verigence login change it there FIRST, on the same login (same user id, same Clerk account).
+    If Security refuses or cannot be reached nothing is changed in HR, so the two never disagree.
+    Returns True when the login was updated. Without a login only HR's record changes."""
+    email = column_updates.get("personal_email")
+    mobile = column_updates.get("mobile")
+    if email and _email_in_use(conn, email, except_id=employee_id):
+        raise conflict("EMPLOYEE_EMAIL_EXISTS", "This email already belongs to an employee.")
+    if mobile and _mobile_in_use(conn, mobile, except_id=employee_id):
+        raise conflict(
+            "EMPLOYEE_MOBILE_EXISTS", "This mobile number already belongs to another employee."
+        )
+    if "personal_email" not in column_updates and "mobile" not in column_updates:
+        return False
+    linked = conn.execute(
+        text(
+            "SELECT security_user_id::text FROM hr.employee WHERE employee_id = CAST(:id AS uuid)"
+        ),
+        {"id": employee_id},
+    ).scalar_one()
+    if linked is None:
+        if before["login_status"] == "FAILED":
+            # A new email or mobile may fix what Security refused, so the login can be tried again.
+            column_updates["login_status"] = "NOT_CREATED"
+            column_updates["login_error_code"] = None
+        return False
+    if "mobile" in column_updates and not mobile:
+        raise conflict(
+            "MOBILE_REQUIRED_FOR_LOGIN",
+            "This employee has a login, so a mobile number is required.",
+        )
+    if provisioner is None:
+        raise dependency_unavailable("The login service is not configured. Nothing was changed.")
+    conn.rollback()  # nothing is held open while Security is asked
+    try:
+        provisioner.change_contact(user_id=linked, email=email or None, mobile=mobile or None)
+    except ProvisioningError as exc:
+        if exc.code == "EMAIL_OR_MOBILE_EXISTS":
+            raise conflict(
+                "LOGIN_CONTACT_IN_USE",
+                "Another Verigence user already has this email or mobile number. Nothing was changed.",
+            ) from exc
+        if exc.code == "CONTACT_NOT_VALID":
+            raise ApiError(
+                422,
+                "LOGIN_CONTACT_NOT_VALID",
+                "Verigence did not accept this email or mobile number.",
+            ) from exc
+        raise dependency_unavailable(
+            f"The login could not be updated ({exc.code}). Nothing was changed. Please try again."
+        ) from exc
+    changed: dict[str, Any] = {"securityUserId": linked}
+    if email:
+        changed["email"] = {"from": before["personal_email"], "to": email}
+    if mobile:
+        changed["mobile"] = {"from": before["mobile"], "to": mobile}
+    # Recorded at once, so the history shows it even if the HR record below cannot be saved.
+    record_audit(
+        conn,
+        actor_user_id=actor,
+        action="LOGIN_CONTACT_CHANGED",
+        entity_type="employee",
+        entity_id=employee_id,
+        changes=changed,
+        request=request,
+    )
+    conn.commit()
+    return True
+
+
 @router.patch("/employees/{employee_id}")
 def update_employee(
     employee_id: str,
     body: EmployeeUpdate,
     request: Request,
     user: HumanPrincipal = Depends(can_manage),
+    provisioner: UserProvisioner | None = Depends(get_provisioner),
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     employee_id = _uuid(employee_id)
@@ -777,6 +889,15 @@ def update_employee(
             changes[field] = {"from": old_out, "to": new_out}
     if not changes:
         return _view(before)
+    login_changed = _change_login_contact(
+        conn,
+        employee_id=employee_id,
+        before=before,
+        column_updates=column_updates,
+        actor=user.user_id,
+        provisioner=provisioner,
+        request=request,
+    )
     try:
         if column_updates:
             sets = ", ".join(f"{c} = :{c}" for c in column_updates)
@@ -815,7 +936,11 @@ def update_employee(
         changes=changes,
         request=request,
     )
-    return _view(_fetch(conn, employee_id))
+    result = _view(_fetch(conn, employee_id))
+    if login_changed:
+        # The person signs in with the new email from now on: HR should tell them (Welcome email).
+        result["loginContactChanged"] = True
+    return result
 
 
 @router.get("/employees/{employee_id}/sensitive")

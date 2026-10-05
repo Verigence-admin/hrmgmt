@@ -14,7 +14,13 @@ from sqlalchemy import text
 from hrmgmt import permissions as perm
 from hrmgmt.config import Settings
 from hrmgmt.main import create_app
-from hrmgmt.provisioning import CreatedLogin, FoundLogin, ProvisioningError, SyncOutcome
+from hrmgmt.provisioning import (
+    ContactChanged,
+    CreatedLogin,
+    FoundLogin,
+    ProvisioningError,
+    SyncOutcome,
+)
 from hrmgmt.storage import StorageError
 from tests.test_api import FakeAuthorizer, FakeValidator
 
@@ -85,6 +91,12 @@ class FakeProvisioner:
             users[uid] = dataclasses.replace(u, status=status, is_employee=True)
         self.users = list(users.values())
         return out
+
+    def change_contact(self, *, user_id, email=None, mobile=None):
+        self.contact_calls = getattr(self, "contact_calls", []) + [(user_id, email, mobile)]
+        if getattr(self, "contact_error", None):
+            raise ProvisioningError(self.contact_error, "x")
+        return ContactChanged(email is not None, mobile is not None, email is not None)
 
     def set_password(self, *, user_id, password):
         self.passwords = getattr(self, "passwords", []) + [(user_id, password)]
@@ -172,7 +184,7 @@ class World:
             "employee_code": f"W{n}".upper(),
             "full_name": "Test Person",
             "personal_email": f"t.{n}@example.com",
-            "mobile": "9876543210",
+            "mobile": "9" + str(uuid.uuid4().int)[:9],  # each employee's mobile is their own
         }
         body.update(over)
         self.grant(hr_user, perm.HR_EMPLOYEE_MANAGE, perm.HR_EMPLOYEE_READ)

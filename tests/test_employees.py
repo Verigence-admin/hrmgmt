@@ -155,7 +155,7 @@ def payload(**over):
         "employee_code": f"T{n}".upper(),
         "full_name": "Asha Rao",
         "personal_email": f"asha.{n}@example.com",
-        "mobile": "98765 43210",
+        "mobile": "9" + str(uuid.uuid4().int)[:9],  # each employee's mobile is their own
         "pan": "ABCDE1234F",
         "aadhaar": "1234 5678 9012".replace(" ", ""),
     }
@@ -178,7 +178,7 @@ def audit_rows(engine, entity_id):
 
 def test_create_makes_login_and_shows_password_once(make_client, migrated_engine):
     client, prov = make_client()
-    r = client.post("/hr/v1/employees", json=payload(), headers=auth(HR))
+    r = client.post("/hr/v1/employees", json=payload(mobile="98765 43210"), headers=auth(HR))
     assert r.status_code == 201
     body = r.json()
     emp = body["employee"]
@@ -542,6 +542,35 @@ def test_provisioner_maps_failures_and_never_retries(status, code):
         )
     assert exc.value.code == code and len(sent) == 1
     assert "pw" not in str(exc.value)
+
+
+def test_provisioner_sends_a_contact_change_once_to_the_same_login():
+    prov, sent = _provisioner(
+        200,
+        {"userId": "u-1", "emailChanged": True, "mobileChanged": False, "oldEmailRemoved": True},
+    )
+    got = prov.change_contact(user_id="u-1", email="new@b.co")
+    assert got.email_changed and not got.mobile_changed and got.old_email_removed
+    assert len(sent) == 1 and sent[0].url.path == "/security/v1/service/users/u-1/contact"
+    assert json.loads(sent[0].content) == {"email": "new@b.co", "mobile": None}
+
+
+@pytest.mark.parametrize(
+    "status,code",
+    [
+        (404, "LOGIN_NOT_FOUND"),
+        (409, "EMAIL_OR_MOBILE_EXISTS"),
+        (422, "CONTACT_NOT_VALID"),
+        (403, "NOT_PERMITTED"),
+        (502, "IDENTITY_PROVIDER_FAILED"),
+        (500, "SECURITY_UNAVAILABLE"),
+    ],
+)
+def test_provisioner_maps_contact_change_failures_and_never_retries(status, code):
+    prov, sent = _provisioner(status)
+    with pytest.raises(ProvisioningError) as exc:
+        prov.change_contact(user_id="u-1", mobile="9876543210")
+    assert exc.value.code == code and len(sent) == 1
 
 
 # ---- more onboarding fields and qualifications -------------------------------------------
