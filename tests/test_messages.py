@@ -105,7 +105,7 @@ def test_smtp_mailer_sends_once_with_tls_and_maps_failures(monkeypatch):
 
         def send_message(self, message):
             calls.append("send")
-            assert message["To"] == "a@example.com" and "Verigence HR" in message["From"]
+            assert message["To"] == "a@example.com" and message["From"].startswith("Verigence <")
             assert message.get_body(("plain",)).get_content().strip() == "Hello <b>"
             assert "&lt;b&gt;" in message.get_body(("html",)).get_content()
 

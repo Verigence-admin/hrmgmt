@@ -44,7 +44,7 @@ class SmtpMailer:
         user: str,
         password: str,
         from_address: str | None = None,
-        from_name: str = "Verigence HR",
+        from_name: str = "Verigence",
         timeout_seconds: float = 20.0,
     ) -> None:
         if not host or not user or not password:
