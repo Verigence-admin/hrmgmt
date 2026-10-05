@@ -26,8 +26,8 @@ from hrmgmt.storage import ObjectStorage, StorageError
 
 logger = structlog.get_logger(__name__)
 LOGIN_NOTE = (
-    "Shown once. It is not stored. Share it securely. The login stays pending until SuperAdmin "
-    "allows it (Users, Pending Approvals); the employee can sign in only after that."
+    "Shown once. It is not stored. Share it securely. The login is ready to use: it needs no "
+    "approval because HR created it for an employee."
 )
 
 router = APIRouter(prefix="/hr/v1", tags=["Employees"])
