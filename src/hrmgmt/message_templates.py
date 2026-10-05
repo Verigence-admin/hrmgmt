@@ -33,17 +33,20 @@ DEFAULTS: dict[str, dict[str, str]] = {
         "subject": "Your Verigence login is ready",
         "body": (
             "Dear {{name}},\n\n"
-            "Your Verigence login has been created. You can now sign in and download the "
-            "Verigence mobile app. The app can also be used to mark your attendance, in addition "
-            "to the process you follow today.\n\n"
+            "Your Verigence login is ready. Please follow these 3 steps.\n\n"
+            "Step 1. Open this link on your phone. It asks you to sign in, and then takes you "
+            "straight to the page where you download the app:\n"
+            "{{app_link}}\n\n"
             "Sign-in ID: {{login_id}}\n"
             "Temporary password: {{temp_password}}\n\n"
-            "1. Sign in here: {{sign_in_link}}\n"
-            "2. After signing in, download the mobile app here: {{app_link}}\n\n"
-            "Please keep this password private and do not forward this email. If you want a "
-            'password of your own, use "Forgot password" on the sign-in page. If you cannot '
-            "sign in, reply to this email or speak to HR.\n\n"
-            "Regards,\nHR, {{company}}"
+            "Step 2. Tap Download APK, then open the file and install it.\n\n"
+            "Step 3. Every working day, open the app, tap My HR, and tap Check in when you "
+            "reach work. Tap Check out when you leave. Allow Camera and Location when the "
+            "app asks.\n\n"
+            "Please do not share your password with anyone. If you want a password of your own, "
+            'use "Forgot password" on the sign-in page. If you cannot sign in, reply to this '
+            "email or speak to HR.\n\n"
+            "Thank you,\nHR, {{company}}"
         ),
     },
 }

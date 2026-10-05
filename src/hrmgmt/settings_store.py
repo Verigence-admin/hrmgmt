@@ -95,7 +95,7 @@ SPECS: dict[str, Spec] = {
     "email.app_download_url": Spec(
         "text",
         "https://verigence-web-dev.jbrconsulting-it.workers.dev/apps",
-        label="Mobile app download link put in employee emails (inside Verigence)",
+        label="Link put in employee emails: sign in, then the app download page",
         group="Email",
     ),
     "company.esi_registration": Spec("text", "", label="ESI registration number", group="Company"),
