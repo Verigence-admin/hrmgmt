@@ -43,9 +43,17 @@ DEFAULTS: dict[str, dict[str, str]] = {
             "Step 3. Every working day, open the app, tap My HR, and tap Check in when you "
             "reach work. Tap Check out when you leave. Allow Camera and Location when the "
             "app asks.\n\n"
-            "Please do not share your password with anyone. If you want a password of your own, "
-            'use "Forgot password" on the sign-in page. If you cannot sign in, reply to this '
-            "email or speak to HR.\n\n"
+            "Please do not share your password with anyone.\n\n"
+            "If you want to set a password of your own, or you forget your password, do this:\n"
+            'a. On the sign-in page, tap "Forgot password?" (on the right, just below the password box).\n'
+            'b. Type your email address (the same one as your Sign-in ID) and tap "Send verification '
+            'code".\n'
+            "c. Open your email. Verigence sends you a 6-digit code. If it has not come, look in your "
+            'Spam folder, or tap "Resend code".\n'
+            "d. Type the 6-digit code. Then type your new password (at least 8 characters) two times.\n"
+            'e. Tap "Reset password". You will see "Password reset complete".\n'
+            'f. Tap "Back to sign in" and sign in with your new password.\n\n'
+            "If you cannot sign in, reply to this email or speak to HR.\n\n"
             "Thank you,\nHR, {{company}}"
         ),
     },
