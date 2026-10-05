@@ -415,6 +415,7 @@ def _delete_employee(conn: Connection, eid: str, has_photo: bool) -> list[str]:
         "employee_experience",
         "employee_sensitive",
         "employee_status_change",
+        "employee_face",
         "message_log",
     ):
         conn.execute(text(f"DELETE FROM hr.{table} WHERE {where}"), p)

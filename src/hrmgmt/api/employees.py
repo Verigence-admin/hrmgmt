@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from datetime import date
 from decimal import Decimal
 from typing import Annotated, Any, Literal
@@ -7,6 +8,7 @@ from typing import Annotated, Any, Literal
 import structlog
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from fastapi.responses import Response
+from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import Connection, text
 from sqlalchemy.exc import IntegrityError
@@ -17,6 +19,8 @@ from hrmgmt.audit import record_audit
 from hrmgmt.catalog import STATES, canonical_department, canonical_state
 from hrmgmt.db import get_conn
 from hrmgmt.errors import ApiError, conflict, dependency_unavailable, not_found
+from hrmgmt.faceidentity import save_profile_face
+from hrmgmt.facematch import embed
 from hrmgmt.passwords import generate_initial_password
 from hrmgmt.photos import MAX_UPLOAD_BYTES, PhotoError, normalise_profile_photo
 from hrmgmt.principal import current_user, require_permission
@@ -1419,6 +1423,14 @@ def _save_photo(
         ),
         {"a": actor, "id": employee_id},
     )
+    # The face numbers of the new photo, for the attendance face match. A photo with no clear face is
+    # kept all the same (the numbers are then empty); this never stops a photo from being saved.
+    try:
+        with Image.open(io.BytesIO(jpeg)) as saved:
+            saved.load()
+            save_profile_face(conn, employee_id, embed(saved))
+    except Exception:
+        logger.warning("hr_face_profile_failed")
     record_audit(
         conn,
         actor_user_id=actor,

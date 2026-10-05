@@ -25,6 +25,7 @@ DELINQUENCY_LABELS = {
     "OUT_OF_FENCE": "Not in tagged location",
     "NO_OUTLET_LOCATION": "No outlet location on file",
     "NO_FACE": "No face found in the photo",
+    "FACE_MISMATCH": "Face does not match",
     "OFF_DAY_WORK": "Worked on an off day",
 }
 # These three belong to one punch, so they say which: "No face found in the check-out photo".
@@ -40,6 +41,11 @@ def delinquency_label(delinquency: dict[str, Any]) -> str:
     """The wording HR reads, on screen and in Excel. Names the punch when there is one."""
     code = delinquency["code"]
     side = delinquency.get("side")
+    if code == "FACE_MISMATCH" and side in _SIDE_WORDS:
+        # What the face was compared with: the profile photo, or the check-in photo of the day.
+        if delinquency.get("ref") == "CHECK_IN":
+            return "Face at check-out does not match the check-in photo"
+        return f"Face does not match the profile photo at {_SIDE_WORDS[side]}"
     if side in _SIDE_WORDS and code in _PER_PUNCH:
         return _PER_PUNCH[code].format(side=_SIDE_WORDS[side])
     return DELINQUENCY_LABELS[code]
@@ -273,11 +279,17 @@ def _row(
     )
     for side in ("in", "out"):
         flags = record[f"check_{side}_flags"] or []
-        for code in ("NO_OUTLET_LOCATION", "NO_FACE"):
+        for code in ("NO_OUTLET_LOCATION", "NO_FACE", "FACE_MISMATCH"):
             # Not for anyone to approve: HR fixes the outlet, or looks at the photo.
             if code in flags and not any(e["kind"] == code and e["side"] == side for e in found):
                 row.delinquencies.append(
-                    {"code": code, "status": None, "reason": None, "side": side}
+                    {
+                        "code": code,
+                        "status": None,
+                        "reason": None,
+                        "side": side,
+                        "ref": record[f"check_{side}_face_ref"],
+                    }
                 )
     if record["check_out_at"] is None and past:
         row.delinquencies.append({"code": "MISSING_CHECK_OUT", "status": None})

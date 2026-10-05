@@ -23,6 +23,8 @@ from hrmgmt.authz import Authorizer
 from hrmgmt.db import get_conn
 from hrmgmt.errors import ApiError, conflict, dependency_unavailable, not_found
 from hrmgmt.facecheck import face_present
+from hrmgmt.faceidentity import profile_face
+from hrmgmt.facematch import embed, similarity
 from hrmgmt.geo import haversine_m
 from hrmgmt.geocode import ReverseGeocoder
 from hrmgmt.principal import current_user, get_authorizer, has_permission, require_permission
@@ -222,7 +224,7 @@ def _record_event(
     day = (
         conn.execute(
             text(
-                "SELECT attendance_id, check_in_at, check_out_at FROM hr.attendance_day"
+                "SELECT attendance_id, check_in_at, check_out_at, check_in_face FROM hr.attendance_day"
                 " WHERE employee_id = CAST(:e AS uuid) AND work_date = :d FOR UPDATE"
             ),
             {"e": employee_id, "d": work_date},
@@ -292,9 +294,33 @@ def _record_event(
     # Only whether a face is in the picture; nobody is identified. A photo is never refused for it:
     # it is flagged, and HR sees the flag.
     checked = time.perf_counter()
-    if face_present(image) is False:
+    face_found = face_present(image)
+    if face_found is False:
         flags.append("NO_FACE")
     face_checked = time.perf_counter()
+    # Does the face look like the employee? Against their profile photo when they have one, and if
+    # not, a check-out against the check-in photo of the same day. Only ever a flag.
+    face_numbers: bytes | None = None
+    face_score: float | None = None
+    face_ref: str | None = None
+    if face_found is not False and int(values["attendance.face_match_on"]) == 1:
+        face_numbers = embed(image)
+        if face_numbers is not None:
+            reference = profile_face(conn, storage, employee_id)
+            face_ref = "PROFILE"
+            if reference is None and event == "CHECK_OUT" and day is not None:
+                reference = day["check_in_face"]
+                face_ref = "CHECK_IN"
+            if reference is not None:
+                face_score = similarity(bytes(reference), face_numbers)
+            if (
+                face_score is not None
+                and face_score < int(values["attendance.face_match_threshold"]) / 1000
+            ):
+                flags.append("FACE_MISMATCH")
+            if face_score is None:
+                face_ref = None
+    face_matched = time.perf_counter()
 
     address = geocoder.address(latitude, longitude) if geocoder else None
     geocoded = time.perf_counter()
@@ -375,6 +401,21 @@ def _record_event(
             ),
             {**params, "id": attendance_id},
         )
+    if face_numbers is not None and event == "CHECK_IN":
+        conn.execute(
+            text(
+                "UPDATE hr.attendance_day SET check_in_face = :f WHERE attendance_id = CAST(:a AS uuid)"
+            ),
+            {"f": face_numbers, "a": attendance_id},
+        )
+    if face_score is not None:
+        conn.execute(
+            text(
+                f"UPDATE hr.attendance_day SET {prefix}_face_score = :s, {prefix}_face_ref = :r"
+                " WHERE attendance_id = CAST(:a AS uuid)"
+            ),
+            {"s": face_score, "r": face_ref, "a": attendance_id},
+        )
     for exception_kind in kinds:
         conn.execute(
             text(
@@ -413,7 +454,8 @@ def _record_event(
         photo_kb=len(data) // 1024,
         checks_ms=round((checked - started) * 1000),
         face_ms=round((face_checked - checked) * 1000),
-        address_ms=round((geocoded - face_checked) * 1000),
+        match_ms=round((face_matched - face_checked) * 1000),
+        address_ms=round((geocoded - face_matched) * 1000),
         stamp_ms=round((stamped_at - geocoded) * 1000),
         store_ms=round((stored - stamped_at) * 1000),
         total_ms=round((time.perf_counter() - started) * 1000),
