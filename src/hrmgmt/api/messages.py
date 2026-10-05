@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import time
 from typing import Annotated, Any, Literal
 
+import structlog
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import Connection, text
@@ -20,6 +22,8 @@ from hrmgmt.passwords import generate_initial_password
 from hrmgmt.principal import require_permission
 from hrmgmt.provisioning import ProvisioningError, UserProvisioner
 from hrmgmt.security import HumanPrincipal
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/hr/v1/messages", tags=["Employee messages"])
 
@@ -272,6 +276,8 @@ def send(
             f"The users could not be looked up ({exc.code}). Please try again."
         ) from exc
     results: list[dict[str, Any]] = []
+    started = time.perf_counter()
+    password_ms = mail_ms = 0
     for uid in ids:
         person = found.get(uid)
         if person is None:
@@ -291,6 +297,7 @@ def send(
         values = {**shared, "name": name or "there", "login_id": person.email}
         if body.template == tpl.WELCOME:
             password = generate_initial_password()
+            step = time.perf_counter()
             try:
                 login_email = prov.set_password(user_id=uid, password=password)
             except ProvisioningError as exc:
@@ -310,8 +317,11 @@ def send(
                         )
                     )
                 continue
+            finally:
+                password_ms += int((time.perf_counter() - step) * 1000)
             values["login_id"] = login_email or person.email
             values["temp_password"] = password
+        step = time.perf_counter()
         try:
             mailer.send(
                 to=person.email,
@@ -328,6 +338,8 @@ def send(
             )
             results.append(_result(uid, name, "FAILED", exc.code, note))
             continue
+        finally:
+            mail_ms += int((time.perf_counter() - step) * 1000)
         _log(conn, uid, name, body.template, "SENT", None, user.user_id)
         record_audit(
             conn,
@@ -339,6 +351,13 @@ def send(
             request=request,
         )
         results.append(_result(uid, name, "SENT"))
+    logger.info(
+        "hr_messages_send_timing",
+        people=len(ids),
+        password_ms=password_ms,
+        mail_ms=mail_ms,
+        total_ms=int((time.perf_counter() - started) * 1000),
+    )
     return {"results": results}
 
 
