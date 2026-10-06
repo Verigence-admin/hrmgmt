@@ -48,7 +48,9 @@ def upgrade() -> None:
         )
         """
     )
-    op.execute("CREATE INDEX ticket_message_ticket_idx ON hr.ticket_message (ticket_id, created_at)")
+    op.execute(
+        "CREATE INDEX ticket_message_ticket_idx ON hr.ticket_message (ticket_id, created_at)"
+    )
     op.execute(
         """
         CREATE TABLE hr.ticket_file (

@@ -51,7 +51,7 @@ def delinquency_label(delinquency: dict[str, Any]) -> str:
     return DELINQUENCY_LABELS[code]
 
 
-_NO_PROJECT = {"projectCode": None, "projectName": None, "roles": [], "outlets": []}
+_NO_PROJECT: dict[str, Any] = {"projectCode": None, "projectName": None, "roles": [], "outlets": []}
 
 
 @dataclass
@@ -343,7 +343,7 @@ def row_view(row: Row) -> dict[str, Any]:
             {
                 "code": d["code"],
                 "label": delinquency_label(d),
-                "side": {"in": "CHECK_IN", "out": "CHECK_OUT"}.get(d.get("side")),
+                "side": {"in": "CHECK_IN", "out": "CHECK_OUT"}.get(d.get("side") or ""),
                 "decision": d["status"],
                 "reason": d.get("reason"),
             }

@@ -332,6 +332,7 @@ def _record_event(
         ),
         {"e": employee_id},
     ).first()
+    assert name_row is not None  # the employee was found by the request above
     stamped = stamp_photo(
         image,
         when=now,

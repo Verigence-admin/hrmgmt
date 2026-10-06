@@ -131,7 +131,7 @@ def validate_statutory(config: dict[str, Any]) -> dict[str, Any]:
         slabs.append(
             {"from": str(frm), "to": None if to is None else str(to), "monthly": str(monthly)}
         )
-    slabs.sort(key=lambda s: Decimal(s["from"]))
+    slabs.sort(key=lambda s: Decimal(str(s["from"])))
     if pt["enabled"] and not slabs:
         raise PayrollError("Professional tax: add at least one slab, or turn it off.")
     pt["slabs"] = slabs

@@ -98,7 +98,10 @@ def stamp_photo(
 
 
 def _wrap(
-    draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.ImageFont | ImageFont.FreeTypeFont,
+    max_width: int,
 ) -> list[str]:
     words = text.split()
     lines: list[str] = []

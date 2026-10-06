@@ -13,7 +13,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("ALTER TABLE hr.attendance_exception DROP CONSTRAINT attendance_exception_kind_check")
+    op.execute(
+        "ALTER TABLE hr.attendance_exception DROP CONSTRAINT attendance_exception_kind_check"
+    )
     op.execute(
         "ALTER TABLE hr.attendance_exception ADD CONSTRAINT attendance_exception_kind_check"
         " CHECK (kind IN ('LATE_CHECK_IN', 'EARLY_CHECK_OUT', 'OUT_OF_FENCE',"

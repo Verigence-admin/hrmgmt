@@ -41,7 +41,8 @@ def _detector() -> Any | None:
         import cv2
 
         # "alt2" is the more reliable of OpenCV's classic face detectors. It is used only if YuNet cannot load.
-        found = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_alt2.xml")
+        cascades: str = cv2.data.haarcascades  # type: ignore[attr-defined]
+        found = cv2.CascadeClassifier(cascades + "haarcascade_frontalface_alt2.xml")
         return None if found.empty() else found
     except Exception:
         logger.warning("hr_face_check_unavailable", detector="haar")

@@ -122,7 +122,8 @@ def _amount_for(
         value = Decimal(amount or "")
     except InvalidOperation as exc:
         raise ApiError(422, "CLAIM_AMOUNT_INVALID", "Enter a valid amount.") from exc
-    if value <= 0 or value.as_tuple().exponent < -2:
+    exponent = value.as_tuple().exponent
+    if not value.is_finite() or value <= 0 or not isinstance(exponent, int) or exponent < -2:
         raise ApiError(
             422, "CLAIM_AMOUNT_INVALID", "Enter an amount in rupees, with at most two decimals."
         )
@@ -298,7 +299,7 @@ def summary(
         "month": first.strftime("%Y-%m"),
         "travelUsed": float(used),
         "travelLimit": float(limit),
-        "travelRemaining": float(max(limit - used, 0)),
+        "travelRemaining": float(max(limit - used, Decimal(0))),
         "financeThreshold": float(values["claims.finance_threshold"]),
         "mealsUsed": float(meals),
         "mealsLimit": float(meals_limit) if meals_limit is not None else None,

@@ -228,9 +228,12 @@ def all_tickets(
     _: HumanPrincipal = Depends(can_support),
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    counts = dict(
-        conn.execute(text("SELECT status, count(*) FROM hr.ticket GROUP BY status")).all()
-    )
+    counts: dict[str, int] = {
+        row[0]: row[1]
+        for row in conn.execute(
+            text("SELECT status, count(*) FROM hr.ticket GROUP BY status")
+        ).all()
+    }
     rows = (
         conn.execute(
             text(

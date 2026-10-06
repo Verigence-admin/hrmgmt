@@ -174,7 +174,7 @@ def _plan(conn: Connection, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         amount = _money(r["salary"])
         if amount is None:
             plan["errors"].append("Salary is not a valid monthly amount.")
-        if plan["errors"] or person is None:
+        if plan["errors"] or person is None or amount is None:
             plans.append(plan)
             continue
         plan["employeeId"] = str(person["employee_id"])

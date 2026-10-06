@@ -19,8 +19,12 @@ _STATUSES = "('ACTIVE', 'SUSPENDED', 'TERMINATED', 'QUIT')"
 
 def upgrade() -> None:
     op.execute("ALTER TABLE hr.employee DROP CONSTRAINT employee_employment_status_check")
-    op.execute("UPDATE hr.employee SET employment_status = 'SUSPENDED' WHERE employment_status = 'INACTIVE'")
-    op.execute("UPDATE hr.employee SET employment_status = 'TERMINATED' WHERE employment_status = 'EXITED'")
+    op.execute(
+        "UPDATE hr.employee SET employment_status = 'SUSPENDED' WHERE employment_status = 'INACTIVE'"
+    )
+    op.execute(
+        "UPDATE hr.employee SET employment_status = 'TERMINATED' WHERE employment_status = 'EXITED'"
+    )
     op.execute(
         "ALTER TABLE hr.employee ADD CONSTRAINT employee_employment_status_check"
         f" CHECK (employment_status IN {_STATUSES})"
