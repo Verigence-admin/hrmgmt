@@ -70,6 +70,7 @@ def compare_batch(
     user_id: str,
     permissions: tuple[str, ...],
     answers: dict[str, bool | None],
+    old_ms: int | None = None,
 ) -> None:
     batch = getattr(authorizer, "are_allowed", None)
     if batch is None:
@@ -88,6 +89,7 @@ def compare_batch(
             ok=False,
             error=type(exc).__name__,
             ms=round((time.perf_counter() - started) * 1000),
+            old_ms=old_ms,
         )
         return
     elapsed = round((time.perf_counter() - started) * 1000)
@@ -99,6 +101,7 @@ def compare_batch(
         different=differing,
         allowed=sum(1 for p in permissions if got[p]),
         ms=elapsed,
+        old_ms=old_ms,
     )
 
 
@@ -107,6 +110,7 @@ def _start_shadow(
     user_id: str,
     permissions: tuple[str, ...],
     answers: dict[str, bool | None],
+    old_ms: int | None = None,
 ) -> None:
     now = time.monotonic()
     with _SHADOW_LOCK:
@@ -122,7 +126,7 @@ def _start_shadow(
 
     def run() -> None:
         try:
-            compare_batch(authorizer, user_id, permissions, answers)
+            compare_batch(authorizer, user_id, permissions, answers, old_ms)
         finally:
             _SHADOW_SLOTS.release()
 
@@ -141,14 +145,17 @@ def me(
     # One question per permission, asked side by side so the answer takes about one round trip. If Security is
     # slow on one of them, that permission counts as not granted for now and the rest still answers: the
     # employee link below comes from HR's own database and must never fail because of a slow check.
+    asked_at = time.perf_counter()
     with ThreadPoolExecutor(max_workers=8) as pool:
         answers = list(pool.map(lambda p: _ask(authorizer, user.user_id, p), perm.ALL_PERMISSIONS))
+    old_ms = round((time.perf_counter() - asked_at) * 1000)
     granted = [p for p, ok in zip(perm.ALL_PERMISSIONS, answers, strict=True) if ok]
     _start_shadow(
         authorizer,
         user.user_id,
         perm.ALL_PERMISSIONS,
         dict(zip(perm.ALL_PERMISSIONS, answers, strict=True)),
+        old_ms,
     )
     return {
         "userId": user.user_id,
