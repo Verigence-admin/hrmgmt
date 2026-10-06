@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 from typing import Annotated, Any
 
+import structlog
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
 from openpyxl import Workbook
@@ -22,6 +23,7 @@ from hrmgmt.principal import require_permission
 from hrmgmt.security import HumanPrincipal
 from hrmgmt.timeutil import Clock, ist_date, to_ist
 
+logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/hr/v1", tags=["Attendance reports"])
 
 can_read_attendance = require_permission(perm.HR_ATTENDANCE_READ_ALL)
@@ -59,6 +61,16 @@ def daily_attendance(
         if previous is None or (not previous.delinquencies and r.delinquencies):
             people[r.employee_id] = r
     counts = [r.status for r in people.values()]
+    # Only numbers, so that a list that looks wrong on screen can be checked against what was sent.
+    logger.info(
+        "hr_daily_attendance",
+        date=day.isoformat(),
+        project=project_code,
+        employees=len(people),
+        checked_in=sum(1 for r in people.values() if r.check_in_at),
+        checked_out=sum(1 for r in people.values() if r.check_out_at),
+        rows=len(rows),
+    )
     return {
         "date": day.isoformat(),
         "dayKind": kind,
