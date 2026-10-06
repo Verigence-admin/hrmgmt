@@ -200,9 +200,11 @@ def build_rows(
         for emp in employees:
             eid = str(emp["employee_id"])
             joined = emp["date_of_joining"]
-            if joined is not None and joined > day:
-                continue
             record = days.get((eid, day))
+            # Before the joining date there is nothing to expect, but a check-in that was made is
+            # always shown, so a wrong joining date can never hide someone who was at work.
+            if joined is not None and joined > day and record is None:
+                continue
             if non_working and record is None:
                 continue
             on_leave = any(e == eid and f <= day <= t for e, f, t in leave)

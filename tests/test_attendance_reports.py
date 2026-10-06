@@ -101,6 +101,33 @@ def test_daily_view_shows_who_is_in_out_absent_or_on_leave_and_what_is_wrong(
     assert body["dayKind"] == "WORKING" and body["summary"]["absent"] >= 1
 
 
+def test_daily_view_never_hides_someone_who_checked_in_because_of_a_later_joining_date(
+    world, migrated_engine
+):
+    admin, keeper = _hr(world)
+    worker, worker_user = _person(world, admin)
+    not_yet, not_yet_user = _person(world, admin)
+    for u in (worker_user, not_yet_user):
+        world.assign(u, "PC", outlet=OUTLET)
+    send(world, worker_user, "in", token(world, worker_user), where=NEAR)
+    with migrated_engine.begin() as conn:
+        # a joining date typed in wrongly, later than the day they were at work
+        conn.execute(
+            text(
+                "UPDATE hr.employee SET date_of_joining = '2026-10-14'"
+                " WHERE employee_id IN (CAST(:a AS uuid), CAST(:b AS uuid))"
+            ),
+            {"a": worker["employeeId"], "b": not_yet["employeeId"]},
+        )
+    day = world.clock().date().isoformat()
+    rows = _rows(world, keeper, day)
+    # the person who checked in is listed, with the check-in
+    assert rows[worker["employeeCode"]][0]["status"] == "CHECKED_IN"
+    assert rows[worker["employeeCode"]][0]["checkInAt"] is not None
+    # the person with no check-in and a later joining date is still not expected yet
+    assert not_yet["employeeCode"] not in rows
+
+
 def test_daily_view_carries_the_photo_flags_and_the_reason_for_being_away(world):
     admin, keeper = _hr(world)
     emp, user = _person(world, admin)
