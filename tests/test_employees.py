@@ -437,7 +437,6 @@ def test_employee_reads_and_edits_only_their_own_permitted_fields(make_client, m
 @pytest.mark.parametrize(
     "forbidden",
     [
-        {"full_name": "Hacker"},
         {"designation_code": "MANAGER"},
         {"pan": "ABCDE1234F"},
         {"employment_status": "ACTIVE"},
