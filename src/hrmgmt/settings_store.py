@@ -45,6 +45,17 @@ SPECS: dict[str, Spec] = {
     "attendance.capture_token_ttl_s": Spec(
         "int", 120, 30, 600, "Time allowed to take the photo (seconds)", "Attendance"
     ),
+    "attendance.face_match_on": Spec(
+        "int", 1, 0, 1, "Check that the face matches (1 = on, 0 = off)", "Attendance"
+    ),
+    "attendance.face_match_threshold": Spec(
+        "int",
+        363,
+        100,
+        900,
+        "Face match: lowest score accepted, out of 1000 (the model maker's own value is 363; higher flags more)",
+        "Attendance",
+    ),
     "leave.sick_days_per_year": Spec("int", 5, 0, 60, "Sick leave days per year", "Leave"),
     "leave.earned_days_per_year": Spec("int", 5, 0, 60, "Earned leave days per year", "Leave"),
     "claims.travel_monthly_limit": Spec(

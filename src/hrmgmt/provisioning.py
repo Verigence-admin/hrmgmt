@@ -49,6 +49,13 @@ class SyncOutcome:
     note: str | None
 
 
+@dataclass(frozen=True)
+class ContactChanged:
+    email_changed: bool
+    mobile_changed: bool
+    old_email_removed: bool
+
+
 class UserProvisioner(Protocol):
     def create_user(
         self, *, first_name: str, last_name: str, email: str, mobile: str, password: str
@@ -59,6 +66,12 @@ class UserProvisioner(Protocol):
     def mark_employee(self, *, user_id: str) -> None: ...
 
     def set_password(self, *, user_id: str, password: str) -> str | None: ...
+
+    def change_contact(
+        self, *, user_id: str, email: str | None = None, mobile: str | None = None
+    ) -> ContactChanged: ...
+
+    def sync_employees(self, *, items: list[tuple[str, bool]]) -> list[SyncOutcome]: ...
 
     def list_users(
         self,
@@ -219,6 +232,52 @@ class SecurityUserProvisioner:
             raise ProvisioningError("LOGIN_NOT_FOUND", "The login was not found")
         if status in (401, 403):
             raise ProvisioningError("NOT_PERMITTED", "HRMgmt is not allowed to set passwords")
+        raise ProvisioningError("SECURITY_UNAVAILABLE", f"Security answered HTTP {status}")
+
+    def change_contact(
+        self, *, user_id: str, email: str | None = None, mobile: str | None = None
+    ) -> ContactChanged:
+        """Corrects the email and/or mobile of an existing login. The user keeps the same id and the
+        same identity-provider account, so roles and sessions are untouched. One attempt, no retries;
+        Security makes the email change in a safe order and repeating the call finishes any step left."""
+        try:
+            token = self._token_provider()
+        except Exception as exc:
+            raise ProvisioningError("SECURITY_UNAVAILABLE", "Security is not reachable") from exc
+        try:
+            response = self._client.post(
+                f"/security/v1/service/users/{user_id}/contact",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"email": email, "mobile": mobile},
+                timeout=40.0,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("hr_contact_change_failed", reason="endpoint_unavailable")
+            raise ProvisioningError("SECURITY_UNAVAILABLE", "Security is not reachable") from exc
+        status = response.status_code
+        if status == 200:
+            try:
+                body = response.json()
+                return ContactChanged(
+                    email_changed=bool(body["emailChanged"]),
+                    mobile_changed=bool(body["mobileChanged"]),
+                    old_email_removed=bool(body["oldEmailRemoved"]),
+                )
+            except (ValueError, KeyError, TypeError) as exc:
+                raise ProvisioningError(
+                    "BAD_RESPONSE", "Security returned an unexpected answer"
+                ) from exc
+        logger.warning("hr_contact_change_failed", http_status=status)
+        if status == 404:
+            raise ProvisioningError("LOGIN_NOT_FOUND", "The login was not found")
+        if status == 409:
+            raise ProvisioningError("EMAIL_OR_MOBILE_EXISTS", "Another Verigence user has it")
+        if status == 422:
+            raise ProvisioningError("CONTACT_NOT_VALID", "Email or mobile was refused by Security")
+        if status in (401, 403):
+            raise ProvisioningError("NOT_PERMITTED", "HRMgmt is not allowed to change users")
+        if status == 502:
+            raise ProvisioningError("IDENTITY_PROVIDER_FAILED", "The identity provider refused")
         raise ProvisioningError("SECURITY_UNAVAILABLE", f"Security answered HTTP {status}")
 
     def list_users(

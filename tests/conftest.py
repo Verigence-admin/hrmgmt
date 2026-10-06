@@ -34,3 +34,13 @@ def migrated_engine():
 def _a_face_is_present(monkeypatch):
     """Test photos are plain colour blocks. Unless a test says otherwise, the face check finds a face."""
     monkeypatch.setattr("hrmgmt.api.attendance.face_present", lambda image: True)
+
+
+@pytest.fixture(autouse=True)
+def _forget_remembered_denials():
+    """/me remembers "no" answers for a short time; every test starts with none remembered."""
+    from hrmgmt.api import meta
+
+    meta._DENIED.clear()
+    yield
+    meta._DENIED.clear()

@@ -15,6 +15,7 @@ from hrmgmt.api.attendance_reports import router as attendance_reports_router
 from hrmgmt.api.claims import router as claims_router
 from hrmgmt.api.designation_salary_import import router as designation_salary_import_router
 from hrmgmt.api.employee_import import router as employee_import_router
+from hrmgmt.api.employee_status import router as employee_status_router
 from hrmgmt.api.employee_sync import router as employee_sync_router
 from hrmgmt.api.employees import router as employees_router
 from hrmgmt.api.housekeeping import router as housekeeping_router
@@ -124,6 +125,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(employee_import_router)
     app.include_router(designation_salary_import_router)
     app.include_router(employee_sync_router)
+    app.include_router(employee_status_router)
     app.include_router(messages_router)
     app.include_router(tickets_router)
     app.include_router(housekeeping_router)

@@ -114,7 +114,7 @@ def test_daily_view_carries_the_photo_flags_and_the_reason_for_being_away(world)
     assert row["hasCheckInPhoto"] is True and row["hasCheckOutPhoto"] is False
     away = [d for d in row["delinquencies"] if d["code"] == "OUT_OF_FENCE"]
     assert away and away[0]["reason"] == "Visiting the other showroom"
-    assert away[0]["label"] == "Not in tagged location"
+    assert away[0]["label"] == "Not in tagged location at check-in"
     # a day with no check-in has no photo and no attendance record
     other, other_user = _person(world, admin)
     world.assign(other_user, "PC", outlet=OUTLET)
@@ -355,8 +355,12 @@ def test_the_employee_list_names_each_persons_current_projects(world):
         tenant="tenant-b",
         project=("P2", "Project Two"),
     )
-    body = world.client.get("/hr/v1/employees", headers=world.headers(keeper)).json()
-    people = {e["employeeCode"]: e for e in body["items"]}
+    people = {}
+    for code in (emp["employeeCode"], lone["employeeCode"]):  # by code: the full list is paged
+        body = world.client.get(
+            "/hr/v1/employees", params={"q": code}, headers=world.headers(keeper)
+        ).json()
+        people.update({e["employeeCode"]: e for e in body["items"]})
     assert people[emp["employeeCode"]]["projects"] == ["Project One", "Project Two"]
     assert people[lone["employeeCode"]]["projects"] == []
 

@@ -74,7 +74,7 @@ def good_row(n: str | None = None, **over):
         "name": "Asha Rao",
         "dob": datetime(1995, 4, 2),
         "gender": "Female",
-        "mobile": 9876543210,
+        "mobile": int("9" + str(uuid.uuid4().int)[:9]),  # each employee's mobile is their own
         "email": f"asha.{n.lower()}@example.com",
         "qual": "B com,MBA",
         "code": f"IM{n}",
@@ -106,7 +106,7 @@ def upload(client, path: str, data: bytes, who: str = HR, **form):
 
 
 def test_parser_reads_numbers_dates_and_skips_blank_rows():
-    rows = parse_employee_sheet(sheet([good_row("A1")]))
+    rows = parse_employee_sheet(sheet([good_row("A1", mobile=9876543210)]))
     assert len(rows) == 1
     v = rows[0].values
     assert v["employee_code"] == "IMA1" and v["mobile"] == "9876543210"
