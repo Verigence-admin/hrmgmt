@@ -12,6 +12,8 @@ HR_EMPLOYEE_READ = "hr.employee.read"
 HR_EMPLOYEE_MANAGE = "hr.employee.manage"
 # Approving a change of an employee's status (HR asks, the CEO approves). Held by the CEO role alone.
 HR_EMPLOYEE_STATUS_APPROVE = "hr.employee.status_approve"
+# Setting an employee's status at once, whatever the status. Held by the CEO role (and SuperAdmin), never HR Admin.
+HR_EMPLOYEE_STATUS_DIRECT = "hr.employee.status_direct"
 HR_SENSITIVE_READ = "hr.sensitive.read"
 HR_AUDIT_READ = "hr.audit.read"
 HR_SETTINGS_MANAGE = "hr.settings.manage"
@@ -35,6 +37,7 @@ ALL_PERMISSIONS: tuple[str, ...] = (
     HR_EMPLOYEE_READ,
     HR_EMPLOYEE_MANAGE,
     HR_EMPLOYEE_STATUS_APPROVE,
+    HR_EMPLOYEE_STATUS_DIRECT,
     HR_SENSITIVE_READ,
     HR_AUDIT_READ,
     HR_SETTINGS_MANAGE,
