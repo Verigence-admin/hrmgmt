@@ -1,4 +1,4 @@
-"""An employee's status changes only when HR asks and the CEO approves."""
+"""An employee's status changes when HR asks and the CEO approves; HR's suspension (dated today or earlier) is immediate."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def ceo_user(world):
     )
 
 
-def ask(world, hr, emp, to="SUSPENDED", **over):
+def ask(world, hr, emp, to="TERMINATED", **over):
     body = {"to_status": to, "reason": "Absent without notice", **over}
     return world.client.post(
         f"/hr/v1/employees/{emp['employeeId']}/status-change", json=body, headers=world.headers(hr)
@@ -275,3 +275,61 @@ def test_the_lists_the_history_and_the_counts(world):
         headers=world.headers(hr),
     ).json()
     assert [e["employeeCode"] for e in listed["items"]] == [emp["employeeCode"]]
+
+
+def test_hr_suspends_at_once_without_the_ceo(world):
+    hr = hr_user(world)
+    emp, user_id = linked(world, hr)
+    r = ask(world, hr, emp, "SUSPENDED", effective_date="2026-10-12")
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert (
+        body["status"] == "APPROVED" and body["toStatus"] == "SUSPENDED" and body["decidedBy"] == hr
+    )
+    assert body["decisionNote"] == "Suspension applied directly by HR"
+    assert status_of(world, emp) == "SUSPENDED"
+    assert body["loginOutcome"] == "LOGIN_SUSPENDED"
+    assert world.app.state.provisioner.synced == [[(user_id, True)]]
+    done = actions(world, emp)
+    assert "EMPLOYEE_STATUS_CHANGED" in done and "STATUS_CHANGE_REQUESTED" not in done
+
+
+def test_a_suspension_dated_in_the_past_is_also_immediate_and_a_future_one_waits_for_the_ceo(world):
+    hr, ceo = hr_user(world), ceo_user(world)
+    past, _ = world.employee(hr)
+    assert (
+        ask(world, hr, past, "SUSPENDED", effective_date="2026-10-01").json()["status"]
+        == "APPROVED"
+    )
+    assert status_of(world, past) == "SUSPENDED"
+    later, _ = world.employee(hr)
+    change = ask(world, hr, later, "SUSPENDED", effective_date="2026-10-20").json()
+    assert change["status"] == "PENDING" and status_of(world, later) == "ACTIVE"
+    assert decide(world, ceo, change, "approve").status_code == 200
+    assert status_of(world, later) == "SUSPENDED"
+
+
+def test_terminate_and_quit_still_wait_for_the_ceo_and_a_suspended_employee_cannot_be_suspended_again(
+    world,
+):
+    hr = hr_user(world)
+    emp, _ = world.employee(hr)
+    assert ask(world, hr, emp, "SUSPENDED").status_code == 201
+    again = ask(world, hr, emp, "SUSPENDED")
+    assert again.status_code == 409 and again.json()["code"] == "STATUS_UNCHANGED"
+    quit_ = ask(world, hr, emp, "QUIT")
+    assert quit_.status_code == 201 and quit_.json()["status"] == "PENDING"
+    assert status_of(world, emp) == "SUSPENDED"
+
+
+def test_an_immediate_suspension_still_stands_when_security_cannot_suspend_the_login(world):
+    hr = hr_user(world)
+    emp, _ = linked(world, hr)
+
+    def boom(**_):
+        raise ProvisioningError("SECURITY_DOWN", "down")
+
+    world.app.state.provisioner.sync_employees = boom
+    r = ask(world, hr, emp, "SUSPENDED")
+    assert r.status_code == 201 and r.json()["loginOutcome"] == "LOGIN_NOT_UPDATED"
+    assert status_of(world, emp) == "SUSPENDED"

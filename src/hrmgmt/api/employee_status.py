@@ -1,7 +1,8 @@
 """Changing an employee's status (Active, Suspended, Terminated, Quit).
 
 HR asks for the change and the CEO approves it; the status changes only when it is approved. The
-person who asked cannot approve it. On approval of a status that is not Active, the employee's
+person who asked cannot approve it. One exception: a suspension dated today or earlier takes effect
+at once when HR asks (it is recorded, and the login is suspended the same way as after an approval). On approval of a status that is not Active, the employee's
 Verigence login is suspended at once (one attempt; the Sync with Verigence does it later if that
 attempt fails). A login is never reactivated from here: Security keeps that for SuperAdmin."""
 
@@ -120,16 +121,26 @@ def request_status_change(
     request: Request,
     user: HumanPrincipal = Depends(can_manage),
     clock: Clock = Depends(get_clock),
+    provisioner: UserProvisioner | None = Depends(get_provisioner),
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    """HR asks for a status change. Nothing changes until the CEO approves it."""
+    """HR asks for a status change. Nothing changes until the CEO approves it, except a suspension
+    dated today or earlier, which takes effect at once."""
     employee_id = _uuid(employee_id)
-    current = conn.execute(
-        text("SELECT employment_status FROM hr.employee WHERE employee_id = CAST(:id AS uuid)"),
-        {"id": employee_id},
-    ).scalar_one_or_none()
-    if current is None:
+    found = (
+        conn.execute(
+            text(
+                "SELECT employment_status, security_user_id::text AS uid FROM hr.employee"
+                " WHERE employee_id = CAST(:id AS uuid)"
+            ),
+            {"id": employee_id},
+        )
+        .mappings()
+        .first()
+    )
+    if found is None:
         raise not_found("Employee not found.")
+    current = found["employment_status"]
     if current == body.to_status:
         raise conflict("STATUS_UNCHANGED", "The employee already has this status.")
     today = ist_date(clock())
@@ -166,6 +177,19 @@ def request_status_change(
             "STATUS_CHANGE_PENDING",
             "A change for this employee is already waiting for approval.",
         ) from exc
+    if body.to_status == "SUSPENDED" and effective <= today:
+        return _suspend_now(
+            conn,
+            request,
+            user.user_id,
+            change_id,
+            employee_id,
+            found["uid"],
+            current,
+            effective,
+            body.reason,
+            provisioner,
+        )
     record_audit(
         conn,
         actor_user_id=user.user_id,
@@ -178,6 +202,59 @@ def request_status_change(
             "reason": body.reason,
         },
         request=request,
+    )
+    return _view(_one(conn, change_id))
+
+
+def _suspend_now(
+    conn: Connection,
+    request: Request,
+    actor: str,
+    change_id: str,
+    employee_id: str,
+    login_user_id: str | None,
+    from_status: str,
+    effective: date,
+    reason: str,
+    provisioner: UserProvisioner | None,
+) -> dict[str, Any]:
+    """HR suspends: the status changes now, the request is recorded as decided by the person who made
+    it, and the Verigence login is suspended with the one attempt every status change makes."""
+    conn.execute(
+        text(
+            "UPDATE hr.employee SET employment_status = 'SUSPENDED', updated_at = now(), updated_by = :u"
+            " WHERE employee_id = CAST(:id AS uuid)"
+        ),
+        {"u": actor, "id": employee_id},
+    )
+    conn.execute(
+        text(
+            "UPDATE hr.employee_status_change SET status = 'APPROVED', decided_by = :u, decided_at = now(),"
+            " decision_note = 'Suspension applied directly by HR' WHERE change_id = CAST(:id AS uuid)"
+        ),
+        {"u": actor, "id": change_id},
+    )
+    record_audit(
+        conn,
+        actor_user_id=actor,
+        action="EMPLOYEE_STATUS_CHANGED",
+        entity_type="employee",
+        entity_id=employee_id,
+        changes={
+            "status": {"from": from_status, "to": "SUSPENDED"},
+            "effectiveDate": effective.isoformat(),
+            "reason": reason,
+            "direct": True,
+        },
+        request=request,
+    )
+    conn.commit()  # the suspension stands even if the login step below does not work
+    outcome = _login_step(provisioner, login_user_id, "SUSPENDED")
+    conn.execute(
+        text(
+            "UPDATE hr.employee_status_change SET login_outcome = :o WHERE change_id = CAST(:id AS uuid)"
+        ),
+        {"o": outcome, "id": change_id},
     )
     return _view(_one(conn, change_id))
 
