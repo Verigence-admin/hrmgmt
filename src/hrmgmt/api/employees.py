@@ -210,11 +210,11 @@ class EmployeeUpdate(_Strict):
 
 
 class SelfUpdate(_Strict):
-    """What an employee may change about themselves: everything except their role, designation,
-    mobile, email, department, date of joining, employee code, date of birth, total experience, PAN
-    and Aadhaar. A new email or mobile goes to HR as a request (see contact_changes.py)."""
+    """What an employee may change about themselves: everything except their name (as on Aadhaar
+    or PAN; only HR corrects a spelling), role, designation, mobile, email, department, date of
+    joining, employee code, date of birth, total experience, PAN and Aadhaar. A new email or
+    mobile goes to HR as a request (see contact_changes.py)."""
 
-    full_name: str | None = Field(default=None, min_length=1, max_length=120)
     gender: Gender | None = None
     address: str | None = Field(default=None, max_length=500)
     state: str | None = Field(default=None, max_length=60)
@@ -227,14 +227,6 @@ class SelfUpdate(_Strict):
 
     _state = field_validator("state")(lambda cls, x: _state(x))
     _pincode = field_validator("pincode")(lambda cls, x: _pincode(x))
-
-    @field_validator("full_name")
-    @classmethod
-    def _own_name(cls, x: str | None) -> str | None:
-        cleaned = v.clean_text(x)
-        if x is not None and not cleaned:
-            raise ValueError("Enter your name")
-        return cleaned
 
     @field_validator("emergency_contact_number")
     @classmethod
@@ -1573,8 +1565,6 @@ def update_my_record(
     for field, value in sent.items():
         if field in ("address", "emergency_contact_name", "district"):
             value = v.clean_text(value)
-        if field == "full_name" and value is None:
-            continue  # the name cannot be cleared
         if before[field] != value:
             updates[field] = value
             changes[field] = {"from": before[field], "to": value}

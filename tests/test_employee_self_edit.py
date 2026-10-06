@@ -83,14 +83,13 @@ def prov(world):
 # ---- what an employee may edit ---------------------------------------------------------------
 
 
-def test_an_employee_can_edit_their_own_name_gender_address_and_emergency_contact(world):
+def test_an_employee_can_edit_their_own_gender_address_and_emergency_contact(world):
     hr = hr_user(world)
     emp, user = world.employee(hr)
     new_number = mobile()
     r = mine(
         world,
         user,
-        full_name="  Asha   Rao Nair ",
         gender="FEMALE",
         address="12 Station Road",
         state="odisha",
@@ -103,7 +102,7 @@ def test_an_employee_can_edit_their_own_name_gender_address_and_emergency_contac
     )
     assert r.status_code == 200, r.text
     seen = row(world, emp)
-    assert seen["full_name"] == "Asha Rao Nair" and seen["gender"] == "FEMALE"
+    assert seen["gender"] == "FEMALE"
     assert seen["emergency_contact_name"] == "Ravi Rao"
     assert seen["emergency_contact_number"] == new_number
     assert seen["secondary_email"] == "asha.backup@example.com"
@@ -129,6 +128,7 @@ def test_the_emergency_contact_alone_can_be_changed(world):
 @pytest.mark.parametrize(
     "field,value",
     [
+        ("full_name", "Someone Else"),
         ("designation_code", "MANAGER"),
         ("department", "Finance"),
         ("mobile", "9000000000"),
@@ -152,12 +152,19 @@ def test_the_fields_kept_by_hr_cannot_be_changed_by_the_employee(world, field, v
     assert row(world, emp) == before
 
 
-def test_the_name_cannot_be_made_empty(world):
+def test_only_hr_corrects_a_spelling_of_the_name(world):
     hr = hr_user(world)
     emp, user = world.employee(hr)
     before = row(world, emp)["full_name"]
-    assert mine(world, user, full_name="   ").status_code == 422
+    assert mine(world, user, full_name="Changed Name").status_code == 422
     assert row(world, emp)["full_name"] == before
+    r = world.client.patch(
+        f"/hr/v1/employees/{emp['employeeId']}",
+        json={"full_name": "Corrected Name"},
+        headers=world.headers(hr),
+    )
+    assert r.status_code == 200, r.text
+    assert row(world, emp)["full_name"] == "Corrected Name"
 
 
 # ---- asking HR to change the email or mobile -------------------------------------------------
