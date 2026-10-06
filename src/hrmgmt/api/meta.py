@@ -6,6 +6,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Annotated, Any
 
+import structlog
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import Connection, text
 
@@ -16,6 +17,7 @@ from hrmgmt.db import get_conn
 from hrmgmt.principal import current_user, get_authorizer, require_permission
 from hrmgmt.security import HumanPrincipal
 
+logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/hr/v1", tags=["HR"])
 
 can_read_audit = require_permission(perm.HR_AUDIT_READ)
@@ -52,6 +54,81 @@ def _ask(authorizer: Authorizer, user_id: str, permission: str) -> bool | None:
     return allowed
 
 
+# SHADOW CHECK. The menu's answers always come from the one-by-one questions above. In the background, once
+# per person per five minutes, HR also asks Security for all the permissions in one call and only LOGS whether
+# the answers were the same and how long it took. It never changes an answer, never delays a request, and at
+# most two run at a time. It exists to prove the one-call way against real traffic before anyone relies on it.
+_SHADOW_EVERY_SECONDS = 300.0
+_SHADOW_TIMEOUT_SECONDS = 10.0
+_SHADOW_SEEN: dict[str, float] = {}
+_SHADOW_LOCK = threading.Lock()
+_SHADOW_SLOTS = threading.BoundedSemaphore(2)
+
+
+def compare_batch(
+    authorizer: Authorizer,
+    user_id: str,
+    permissions: tuple[str, ...],
+    answers: dict[str, bool | None],
+) -> None:
+    batch = getattr(authorizer, "are_allowed", None)
+    if batch is None:
+        return
+    started = time.perf_counter()
+    try:
+        got = batch(
+            user_id=user_id,
+            permission_keys=list(permissions),
+            timeout=_SHADOW_TIMEOUT_SECONDS,
+            use_remembered=False,
+        )
+    except Exception as exc:
+        logger.info(
+            "hr_batch_shadow",
+            ok=False,
+            error=type(exc).__name__,
+            ms=round((time.perf_counter() - started) * 1000),
+        )
+        return
+    elapsed = round((time.perf_counter() - started) * 1000)
+    differing = sum(1 for p in permissions if answers.get(p) is not None and answers[p] != got[p])
+    logger.info(
+        "hr_batch_shadow",
+        ok=True,
+        same=differing == 0,
+        different=differing,
+        allowed=sum(1 for p in permissions if got[p]),
+        ms=elapsed,
+    )
+
+
+def _start_shadow(
+    authorizer: Authorizer,
+    user_id: str,
+    permissions: tuple[str, ...],
+    answers: dict[str, bool | None],
+) -> None:
+    now = time.monotonic()
+    with _SHADOW_LOCK:
+        last = _SHADOW_SEEN.get(user_id)
+        if last is not None and now - last < _SHADOW_EVERY_SECONDS:
+            return
+        if len(_SHADOW_SEEN) >= _DENIED_PRUNE_AT:
+            for stale in [k for k, t in _SHADOW_SEEN.items() if now - t >= _SHADOW_EVERY_SECONDS]:
+                _SHADOW_SEEN.pop(stale, None)
+        _SHADOW_SEEN[user_id] = now
+    if not _SHADOW_SLOTS.acquire(blocking=False):
+        return
+
+    def run() -> None:
+        try:
+            compare_batch(authorizer, user_id, permissions, answers)
+        finally:
+            _SHADOW_SLOTS.release()
+
+    threading.Thread(target=run, name="hr-batch-shadow", daemon=True).start()
+
+
 @router.get("/me")
 def me(
     user: HumanPrincipal = Depends(current_user),
@@ -67,6 +144,12 @@ def me(
     with ThreadPoolExecutor(max_workers=8) as pool:
         answers = list(pool.map(lambda p: _ask(authorizer, user.user_id, p), perm.ALL_PERMISSIONS))
     granted = [p for p, ok in zip(perm.ALL_PERMISSIONS, answers, strict=True) if ok]
+    _start_shadow(
+        authorizer,
+        user.user_id,
+        perm.ALL_PERMISSIONS,
+        dict(zip(perm.ALL_PERMISSIONS, answers, strict=True)),
+    )
     return {
         "userId": user.user_id,
         "permissions": granted,

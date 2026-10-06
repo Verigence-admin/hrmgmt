@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 import httpx
@@ -19,6 +20,10 @@ _DEFAULT_TOKEN_REUSE_SECONDS = 60.0
 
 class AuthzUnavailableError(RuntimeError):
     """Security could not give a trustworthy decision. Callers answer 503; they never guess."""
+
+
+class BatchUnavailableError(AuthzUnavailableError):
+    """This Security does not offer the batch check (an older Security). The caller asks one by one."""
 
 
 class Authorizer(Protocol):
@@ -146,6 +151,78 @@ class SecurityAuthorizer:
             with self._allow_lock:
                 self._allow[key] = time.monotonic() + _ALLOW_REUSE_SECONDS
         return allowed
+
+    def are_allowed(
+        self,
+        *,
+        user_id: str,
+        permission_keys: Sequence[str],
+        timeout: float | None = None,
+        use_remembered: bool = True,
+    ) -> dict[str, bool]:
+        """The answers for many HR permissions in ONE call to Security, instead of one call each.
+        Same rules as is_allowed: a remembered ALLOW is reused, a DENY and errors never are, and
+        there is one attempt with no retries. An answer that does not match the question is refused."""
+        if not user_id or not permission_keys:
+            raise ValueError("user_id and permission_keys are required")
+        keys = list(dict.fromkeys(permission_keys))
+        now = time.monotonic()
+        answers: dict[str, bool] = {}
+        pending: list[str] = []
+        with self._allow_lock:
+            for key in keys:
+                until = self._allow.get((user_id, key)) if use_remembered else None
+                if until is not None and until > now:
+                    answers[key] = True
+                    continue
+                if until is not None:
+                    self._allow.pop((user_id, key), None)
+                pending.append(key)
+        if not pending:
+            return answers
+
+        token = self.service_token()
+        try:
+            response = self._client.post(
+                "/security/v1/authorization/check-batch",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"userId": user_id, "tenantId": None, "permissionKeys": pending},
+                timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("hr_security_check_failed", reason="endpoint_unavailable", batch=True)
+            raise AuthzUnavailableError("Security authorization endpoint is unavailable") from exc
+        if response.status_code in (404, 405):
+            raise BatchUnavailableError("Security has no batch authorization check")
+        if response.status_code != 200:
+            logger.warning("hr_security_check_failed", http_status=response.status_code, batch=True)
+            raise AuthzUnavailableError(
+                f"Security authorization failed (HTTP {response.status_code})"
+            )
+
+        payload = _json_object(response, "authorization")
+        decisions = payload.get("decisions")
+        if not isinstance(decisions, list) or len(decisions) != len(pending):
+            raise AuthzUnavailableError(
+                "Security authorization response does not match the request"
+            )
+        for key, decision in zip(pending, decisions, strict=True):
+            if (
+                not isinstance(decision, dict)
+                or not isinstance(decision.get("allowed"), bool)
+                or decision.get("userId") != user_id
+                or decision.get("permissionKey") != key
+            ):
+                raise AuthzUnavailableError(
+                    "Security authorization response does not match the request"
+                )
+            answers[key] = decision["allowed"]
+        with self._allow_lock:
+            until = time.monotonic() + _ALLOW_REUSE_SECONDS
+            for key in pending:
+                if answers[key]:
+                    self._allow[(user_id, key)] = until
+        return answers
 
 
 def _json_object(response: httpx.Response, what: str) -> dict[str, Any]:

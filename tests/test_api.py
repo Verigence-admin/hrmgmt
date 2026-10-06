@@ -272,3 +272,60 @@ def test_unconfigured_service_answers_503(migrated_engine):
     app = create_app(_settings())
     r = TestClient(app).get("/hr/v1/me", headers=auth("x"))
     assert r.status_code == 503
+
+
+class _ShadowAuthorizer(FakeAuthorizer):
+    def __init__(self, grants=None, *, batch_answer=None, boom=False):
+        super().__init__(grants)
+        self.batch_answer = batch_answer
+        self.boom = boom
+        self.batch_calls: list[dict] = []
+
+    def are_allowed(self, *, user_id, permission_keys, timeout=None, use_remembered=True):
+        self.batch_calls.append({"timeout": timeout, "use_remembered": use_remembered})
+        if self.boom:
+            raise AuthzUnavailableError("slow")
+        if self.batch_answer is not None:
+            return {k: self.batch_answer(k) for k in permission_keys}
+        return {
+            k: super(_ShadowAuthorizer, self).is_allowed(user_id=user_id, permission_key=k)
+            for k in permission_keys
+        }
+
+
+def test_shadow_check_never_changes_what_me_answers(make_client):
+    client = make_client()
+    # the batch answer disagrees on purpose, and a second authorizer's batch call blows up
+    client.app.state.authorizer = _ShadowAuthorizer(
+        {"hr5": {perm.HR_EMPLOYEE_READ}}, batch_answer=lambda key: True
+    )
+    body = _me(client, "hr5").json()
+    assert body["permissions"] == [perm.HR_EMPLOYEE_READ]  # the one-by-one answer, not the batch's
+    client.app.state.authorizer = _ShadowAuthorizer({"hr6": {perm.HR_AUDIT_READ}}, boom=True)
+    body = _me(client, "hr6").json()
+    assert body["permissions"] == [perm.HR_AUDIT_READ]
+    assert body["permissionsComplete"] is True
+
+
+def test_shadow_check_logs_whether_the_batch_agreed_and_how_long_it_took():
+    from structlog.testing import capture_logs
+
+    from hrmgmt.api.meta import compare_batch
+
+    perms = (perm.HR_EMPLOYEE_READ, perm.HR_AUDIT_READ)
+    same = _ShadowAuthorizer(batch_answer=lambda key: key == perm.HR_EMPLOYEE_READ)
+    with capture_logs() as logs:
+        compare_batch(same, "u", perms, {perm.HR_EMPLOYEE_READ: True, perm.HR_AUDIT_READ: False})
+    row = next(r for r in logs if r["event"] == "hr_batch_shadow")
+    assert row["ok"] is True and row["same"] is True and row["different"] == 0
+    assert same.batch_calls == [{"timeout": 10.0, "use_remembered": False}]
+
+    with capture_logs() as logs:
+        compare_batch(same, "u", perms, {perm.HR_EMPLOYEE_READ: False, perm.HR_AUDIT_READ: None})
+    row = next(r for r in logs if r["event"] == "hr_batch_shadow")
+    assert row["same"] is False and row["different"] == 1  # an unanswered one is not a difference
+
+    with capture_logs() as logs:
+        compare_batch(_ShadowAuthorizer(boom=True), "u", perms, {})
+    row = next(r for r in logs if r["event"] == "hr_batch_shadow")
+    assert row["ok"] is False and row["error"] == "AuthzUnavailableError"
