@@ -70,7 +70,8 @@ The CEO can act at any step. HR sees everything but only approves what is assign
 
 - One check-in and one check-out per working day, per employee. Sunday is the weekly off. Holidays come from a configurable company calendar.
 - **Configurable times:** standard check-in 10:30, latest check-in 11:15, earliest check-out 17:00, standard check-out 18:30.
-- **Late check-in** (after 11:15) and **early check-out** (before 17:00) show a **warning** and create a request for TL/PM approval. No pay effect for now. An approved exception counts as a normal work day **[as you said]**.
+- **Late check-in** (after 11:15) and **early check-out** (before 17:00) need a **reason** and always go to the TL/PM for approval (5 Nov 2026: mandatory). An approved exception counts as a normal work day; a **rejected** late check-in, early check-out or out-of-fence check-in makes the day a **half day** (half a day's loss of pay in payroll).
+- **Grace** (`attendance.grace_per_month`, default 1): late check-ins and early check-outs together allowed per month. It does not skip TL approval; the TL is shown "this is number N of M allowed". Payroll shows the count beyond grace (`lateEarlyBeyondGrace`); nothing is deducted for it yet.
 - **Geofence:** PCs only. The PC must be within **500 m of one of their assigned outlets** (Audit Core assignments), distance computed on the server (Haversine), never trusted from the client. TL, PM, HR, FinanceAdmin and CEO are not geofenced, but their location is still recorded.
 - **Outside the fence:** the PC cannot silently check in. They submit a reason with the check-in, it becomes a location exception, TL/PM approves, and HR only sees it as a normal day once approved. If an outlet has no coordinates in Audit Core, the screen says so and routes the PC to an exception, it does not guess.
 - **Photo with the location printed on it:** the app captures a live photo (camera only). The server stamps the **address (Google Maps), date and time (server clock, IST) and coordinates** onto the image and stores the stamped file. The stamp is made on the server, so it cannot be edited on the phone. The original is not kept.
@@ -102,6 +103,12 @@ The CEO can act at any step. HR sees everything but only approves what is assign
   (attendance, leave, claims), the oldest, how many are past the deadline (09:00 IST on the Monday
   after the week it was raised in), decisions and average decision time over 30 days. An Executive
   sees their projects; HR and the CEO see all.
+- **Monday 09:00 deadline** (5 Nov 2026): at 09:00 IST each Monday, every Team Lead with a request
+  raised the previous week (or earlier) still waiting on them is **paused from all of Verigence** in
+  Security (both Team Leads when a project has two; Project Managers are not paused). Each Monday is
+  processed once (`hr.approver_deadline_run`); each pause is kept in `hr.approver_pause` with the late
+  requests. SuperAdmin restores access from myHR Settings with a note (audited); restoring closes all of
+  that person's open pauses.
 
 ## 7. Reimbursement
 

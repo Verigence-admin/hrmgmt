@@ -92,6 +92,15 @@ class FakeProvisioner:
         self.users = list(users.values())
         return out
 
+    def pause_access(self, *, user_id, reason):
+        if getattr(self, "pause_error", None):
+            raise ProvisioningError(self.pause_error, "x")
+        self.paused = getattr(self, "paused", []) + [user_id]
+
+    def restore_access(self, *, user_id, restored_by, note):
+        self.restored = getattr(self, "restored", []) + [(user_id, restored_by, note)]
+        return True
+
     def change_contact(self, *, user_id, email=None, mobile=None):
         self.contact_calls = getattr(self, "contact_calls", []) + [(user_id, email, mobile)]
         if getattr(self, "contact_error", None):

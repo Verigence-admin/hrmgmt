@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 import structlog
@@ -81,6 +81,10 @@ class UserProvisioner(Protocol):
         limit: int = 100,
         offset: int = 0,
     ) -> list[UserSummary]: ...
+
+    def pause_access(self, *, user_id: str, reason: str) -> None: ...
+
+    def restore_access(self, *, user_id: str, restored_by: str, note: str) -> bool: ...
 
 
 class SecurityUserProvisioner:
@@ -371,3 +375,41 @@ class SecurityUserProvisioner:
             raise ProvisioningError(
                 "BAD_RESPONSE", "Security returned an unexpected answer"
             ) from exc
+
+    # ---- access pauses (product owner, 4 Nov 2026) -----------------------------------------
+
+    def _service_post(self, path: str, body: dict[str, Any]) -> httpx.Response:
+        try:
+            token = self._token_provider()
+        except Exception as exc:
+            raise ProvisioningError("SECURITY_UNAVAILABLE", "Security is not reachable") from exc
+        try:
+            return self._client.post(path, headers={"Authorization": f"Bearer {token}"}, json=body)
+        except httpx.HTTPError as exc:
+            raise ProvisioningError("SECURITY_UNAVAILABLE", "Security is not reachable") from exc
+
+    def pause_access(self, *, user_id: str, reason: str) -> None:
+        """Pauses the person's whole Verigence access (idempotent in Security)."""
+        response = self._service_post(
+            f"/security/v1/service/users/{user_id}/access-block", {"reason": reason}
+        )
+        if response.status_code != 200:
+            logger.warning("hr_access_pause_failed", http_status=response.status_code)
+            raise ProvisioningError(
+                "SECURITY_REFUSED", f"Security answered HTTP {response.status_code}"
+            )
+
+    def restore_access(self, *, user_id: str, restored_by: str, note: str) -> bool:
+        response = self._service_post(
+            f"/security/v1/service/users/{user_id}/access-restore",
+            {"restoredByUserId": restored_by, "note": note},
+        )
+        if response.status_code != 200:
+            logger.warning("hr_access_restore_failed", http_status=response.status_code)
+            raise ProvisioningError(
+                "SECURITY_REFUSED", f"Security answered HTTP {response.status_code}"
+            )
+        try:
+            return bool(response.json().get("restored"))
+        except ValueError:
+            return False

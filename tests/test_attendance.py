@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import uuid
+from decimal import Decimal
 
 import pytest
 from PIL import Image
@@ -116,6 +117,8 @@ def test_outside_the_fence_needs_a_reason_and_the_same_token_still_works(world):
     tok = token(world, user)
     first = send(world, user, "in", tok, where=FAR)
     assert first.status_code == 422 and first.json()["code"] == "ATTENDANCE_REASON_REQUIRED"
+    # the prompt says how far away, from which outlet, and the limit
+    assert " km from Cuttack Motors (the limit is 500 m)." in first.json()["detail"]
     second = send(world, user, "in", tok, where=FAR, reason="Visiting the other showroom")
     assert second.status_code == 200
     assert (
@@ -141,7 +144,10 @@ def test_team_lead_is_not_geofenced_and_late_arrival_is_an_exception(world):
     _, tl = world.employee(hr)
     world.assign(tl, "TL")
     world.clock.set(ist(2026, 10, 5, 11, 30))
-    r = send(world, tl, "in", token(world, tl), where=FAR)
+    late = send(world, tl, "in", token(world, tl), where=FAR)
+    assert late.status_code == 422 and late.json()["code"] == "ATTENDANCE_REASON_REQUIRED"
+    assert "after 11:15" in late.json()["detail"]
+    r = send(world, tl, "in", token(world, tl), where=FAR, reason="Stuck in traffic")
     assert r.status_code == 200
     assert r.json()["needsApproval"] == ["LATE_CHECK_IN"] and r.json()["distanceM"] is None
 
@@ -231,7 +237,10 @@ def test_check_in_once_check_out_after_and_early_check_out_is_an_exception(world
         == "ATTENDANCE_ALREADY_CHECKED_IN"
     )
     world.clock.set(ist(2026, 10, 5, 16, 30))
-    early = send(world, user, "out", token(world, user, "CHECK_OUT"))
+    no_reason = send(world, user, "out", token(world, user, "CHECK_OUT"))
+    assert no_reason.json()["code"] == "ATTENDANCE_REASON_REQUIRED"
+    assert "before 17:00" in no_reason.json()["detail"]
+    early = send(world, user, "out", token(world, user, "CHECK_OUT"), reason="Doctor")
     assert early.status_code == 200 and early.json()["needsApproval"] == ["EARLY_CHECK_OUT"]
     assert (
         send(world, user, "out", token(world, user, "CHECK_OUT")).json()["code"]
@@ -449,7 +458,7 @@ def test_nobody_decides_their_own_request_even_the_ceo(world):
     world.assign(user, "TL")
     world.grant(user, perm.HR_PAYROLL_APPROVE, perm.HR_ATTENDANCE_READ_ALL)
     world.clock.set(ist(2026, 10, 5, 11, 40))
-    send(world, user, "in", token(world, user))
+    send(world, user, "in", token(world, user), reason="Late")
     xid = exception_for(world, user)
     assert (
         world.client.post(
@@ -650,3 +659,52 @@ def test_every_employee_needs_a_location_even_with_no_project(world):
         world, user, "in", tok, where=FAR
     )  # with a location it works, and nothing needs approval
     assert ok.status_code == 200 and ok.json()["needsApproval"] == []
+
+
+def test_grace_is_shown_to_the_team_lead_and_counted_together_for_late_and_early(world):
+    _, pc, _ = setup_pc(world)
+    hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
+    _, tl = world.employee(hr)
+    world.assign(tl, "TL")
+    world.clock.set(ist(2026, 10, 5, 11, 30))
+    send(world, pc, "in", token(world, pc), reason="Bus late")
+    world.clock.set(ist(2026, 10, 5, 16, 0))
+    send(world, pc, "out", token(world, pc, "CHECK_OUT"), reason="Family")
+    items = world.client.get("/hr/v1/approvals/attendance", headers=world.headers(tl)).json()[
+        "items"
+    ]
+    graces = sorted(
+        (i["kind"], i["grace"]["thisIsNumber"], i["grace"]["withinGrace"]) for i in items
+    )
+    assert graces == [("EARLY_CHECK_OUT", 2, False), ("LATE_CHECK_IN", 1, True)]
+    assert all(
+        i["grace"]["allowed"] == 1 and i["grace"]["lateOrEarlyThisMonth"] == 2 for i in items
+    )
+
+
+def test_a_rejected_exception_is_a_half_day_and_beyond_grace_is_counted(world):
+    from datetime import date as _date
+
+    from hrmgmt import attendance_grace as grace
+
+    emp, pc, _ = setup_pc(world)
+    hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
+    _, tl = world.employee(hr)
+    world.assign(tl, "TL")
+    world.clock.set(ist(2026, 10, 5, 11, 30))
+    send(world, pc, "in", token(world, pc), reason="Overslept")
+    world.clock.set(ist(2026, 10, 6, 11, 40))
+    send(world, pc, "in", token(world, pc), reason="Overslept again")
+    items = world.client.get("/hr/v1/approvals/attendance", headers=world.headers(tl)).json()[
+        "items"
+    ]
+    second = next(i for i in items if i["workDate"] == "2026-10-06")
+    r = world.client.post(
+        f"/hr/v1/approvals/attendance/{second['exceptionId']}/decision",
+        json={"decision": "REJECT", "note": "Twice in two days"},
+        headers=world.headers(tl),
+    )
+    assert r.status_code == 200
+    with world.engine.connect() as conn:
+        assert grace.half_days(conn, emp["employeeId"], _date(2026, 10, 1)) == Decimal("0.5")
+        assert grace.beyond_grace(conn, emp["employeeId"], _date(2026, 10, 1)) == 1

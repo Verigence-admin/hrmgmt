@@ -152,10 +152,19 @@ class Days:
     unpaid_leave_days: Decimal
     extra_lop_days: Decimal
     before_joining_days: int
+    # Half a day for each day with a rejected late, early or out-of-fence exception (4 Nov 2026).
+    half_day_lop: Decimal = ZERO
+    # Late check-ins and early check-outs beyond the month's grace: shown, not deducted (5 Nov 2026).
+    late_early_beyond_grace: int = 0
 
     @property
     def lop_days(self) -> Decimal:
-        total = self.unpaid_leave_days + self.extra_lop_days + Decimal(self.before_joining_days)
+        total = (
+            self.unpaid_leave_days
+            + self.extra_lop_days
+            + self.half_day_lop
+            + Decimal(self.before_joining_days)
+        )
         return min(total, Decimal(self.in_month))
 
     @property
@@ -301,6 +310,8 @@ def compute_line(
             "paidLeaveDays": str(days.paid_leave_days),
             "unpaidLeaveDays": str(days.unpaid_leave_days),
             "extraLopDays": str(days.extra_lop_days),
+            "halfDayLopDays": str(days.half_day_lop),
+            "lateEarlyBeyondGrace": days.late_early_beyond_grace,
             "beforeJoiningDays": days.before_joining_days,
             "absentDays": str(days.absent_days),
             "lopDays": str(days.lop_days),

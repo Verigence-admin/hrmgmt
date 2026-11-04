@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import structlog
 from fastapi import FastAPI
@@ -9,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from hrmgmt.api.access_pauses import router as access_pauses_router
 from hrmgmt.api.admin import router as admin_router
 from hrmgmt.api.attendance import router as attendance_router
 from hrmgmt.api.attendance_reports import router as attendance_reports_router
@@ -26,6 +28,7 @@ from hrmgmt.api.meta import router as meta_router
 from hrmgmt.api.oversight import router as oversight_router
 from hrmgmt.api.payroll import router as payroll_router
 from hrmgmt.api.tickets import router as tickets_router
+from hrmgmt.approver_deadline import WeeklyDeadline
 from hrmgmt.authz import SecurityAuthorizer
 from hrmgmt.config import Settings, get_settings
 from hrmgmt.db import get_engine
@@ -133,6 +136,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(messages_router)
     app.include_router(tickets_router)
     app.include_router(housekeeping_router)
+    app.include_router(access_pauses_router)
     app.include_router(employees_router)
 
     @app.get("/health")
@@ -154,17 +158,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 def app_factory() -> FastAPI:
     app = create_app()
+    jobs: list[Any] = []
     if app.state.workcontext is not None:
         # Once a day, in the background: HR requests never wait on Audit Core.
-        daily = DailySync(get_engine(), app.state.workcontext)
+        jobs.append(DailySync(get_engine(), app.state.workcontext))
+    if app.state.provisioner is not None:
+        # Every Monday 09:00 IST: Team Leads with approvals past the deadline are paused.
+        jobs.append(WeeklyDeadline(get_engine(), app.state.provisioner))
+    if jobs:
 
         @asynccontextmanager
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-            daily.start()
+            for job in jobs:
+                job.start()
             try:
                 yield
             finally:
-                daily.stop()
+                for job in jobs:
+                    job.stop()
 
         app.router.lifespan_context = lifespan
     return app
