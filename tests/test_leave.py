@@ -21,18 +21,32 @@ def world(migrated_engine):
     return w
 
 
-def person(world: World, role: str | None = "PC", tenant="tenant-a", perms=()):
+def person(world: World, role: str | None = "PC", tenant="tenant-a", perms=(), paid=5, **kw):
+    """An employee with `paid` days of paid leave already on file (as an HR adjustment)."""
     hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
     emp, user = world.employee(hr)
     if role:
-        world.assign(user, role, tenant=tenant, outlet=OUTLET if role == "PC" else None)
+        world.assign(user, role, tenant=tenant, outlet=OUTLET if role == "PC" else None, **kw)
     if perms:
         world.grant(user, *perms)
+    if paid:
+        seed(world, emp["employeeId"], paid)
     return emp, user
 
 
+def seed(world: World, employee_id: str, days, leave_type="PAID"):
+    with world.engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO hr.leave_ledger (employee_id, leave_type, leave_year, entry_type, days,"
+                " note) VALUES (CAST(:e AS uuid), :t, 2026, 'ADJUST', :d, 'test opening balance')"
+            ),
+            {"e": employee_id, "t": leave_type, "d": days},
+        )
+
+
 def apply(world, user, **body):
-    body.setdefault("leave_type", "SICK")
+    body.setdefault("leave_type", "PAID")
     body.setdefault("from_date", "2026-10-06")
     body.setdefault("to_date", body["from_date"])
     return world.client.post("/hr/v1/leave/requests", json=body, headers=world.headers(user))
@@ -46,18 +60,24 @@ def decide(world, user, rid, decision="APPROVE", note=None):
     )
 
 
-def balance(world, user, leave_type="SICK"):
+def balance(world, user, leave_type="PAID"):
     b = world.client.get("/hr/v1/leave/balance?year=2026", headers=world.headers(user)).json()
     return next(t for t in b["types"] if t["leaveType"] == leave_type)
 
 
-def test_everyone_starts_with_the_yearly_allowance(world):
-    _, user = person(world)
+def test_nobody_starts_with_paid_leave_only_the_special_occasion_quota(world):
+    _, user = person(world, paid=0)
     b = world.client.get("/hr/v1/leave/balance", headers=world.headers(user)).json()
     assert b["year"] == 2026
-    assert {t["leaveType"]: t["balance"] for t in b["types"]} == {"SICK": 5.0, "EARNED": 5.0}
+    assert {t["leaveType"]: t["balance"] for t in b["types"]} == {
+        "PAID": 0.0,
+        "SPECIAL": 2.0,
+        "COMP_OFF": 0.0,
+    }
     # reading again does not grant again
-    assert balance(world, user)["balance"] == 5.0
+    assert balance(world, user, "SPECIAL")["balance"] == 2.0
+    for old in ("SICK", "EARNED"):
+        assert apply(world, user, leave_type=old).status_code == 422
 
 
 def test_a_range_counts_working_days_only(world):
@@ -71,7 +91,7 @@ def test_sundays_and_holidays_are_not_leave_days(world):
     _, user = person(world)
     hr = world.grant(str(uuid.uuid4()), perm.HR_SETTINGS_MANAGE)
     # Tue 20 Oct is tentative, so it counts until HR declares it
-    r = apply(world, user, leave_type="EARNED", from_date="2026-10-19", to_date="2026-10-20")
+    r = apply(world, user, leave_type="PAID", from_date="2026-10-19", to_date="2026-10-20")
     assert r.json()["days"] == 2.0
     world.client.post(
         f"/hr/v1/leave/requests/{r.json()['requestId']}/cancel", headers=world.headers(user)
@@ -81,7 +101,7 @@ def test_sundays_and_holidays_are_not_leave_days(world):
         json={"name": "Vijaya Dasami", "status": "DECLARED"},
         headers=world.headers(hr),
     )
-    r2 = apply(world, user, leave_type="EARNED", from_date="2026-10-19", to_date="2026-10-20")
+    r2 = apply(world, user, leave_type="PAID", from_date="2026-10-19", to_date="2026-10-20")
     assert r2.json()["days"] == 1.0
     only_sunday = apply(world, user, from_date="2026-10-25", to_date="2026-10-25")
     assert only_sunday.status_code == 422 and only_sunday.json()["code"] == "LEAVE_NO_WORKING_DAYS"
@@ -262,7 +282,7 @@ def test_hr_can_reverse_an_approved_leave_and_adjust_with_a_note(world):
     assert (
         world.client.post(
             f"/hr/v1/leave/employee/{emp_id}/adjust",
-            json={"leave_type": "SICK", "year": 2026, "days": 1},
+            json={"leave_type": "PAID", "year": 2026, "days": 1},
             headers=world.headers(reviewer),
         ).status_code
         == 422
@@ -276,15 +296,15 @@ def test_adjustment_changes_the_balance_through_the_ledger_and_history_cannot_be
     reviewer = world.grant(str(uuid.uuid4()), perm.HR_LEAVE_REVIEW)
     r = world.client.post(
         f"/hr/v1/leave/employee/{emp['employeeId']}/adjust",
-        json={"leave_type": "EARNED", "year": 2026, "days": 2, "note": "Carried over"},
+        json={"leave_type": "PAID", "year": 2026, "days": 2, "note": "Carried over"},
         headers=world.headers(reviewer),
     )
     assert r.status_code == 200
-    assert next(t for t in r.json()["types"] if t["leaveType"] == "EARNED")["balance"] == 7.0
+    assert next(t for t in r.json()["types"] if t["leaveType"] == "PAID")["balance"] == 7.0
     assert (
         world.client.post(
             f"/hr/v1/leave/employee/{emp['employeeId']}/adjust",
-            json={"leave_type": "EARNED", "year": 2026, "days": 0, "note": "none"},
+            json={"leave_type": "PAID", "year": 2026, "days": 0, "note": "none"},
             headers=world.headers(reviewer),
         ).status_code
         == 422
@@ -296,7 +316,8 @@ def test_adjustment_changes_the_balance_through_the_ledger_and_history_cannot_be
     detail = world.client.get(
         f"/hr/v1/leave/employee/{emp['employeeId']}", headers=world.headers(reviewer)
     ).json()
-    assert detail["balance"]["types"][1]["balance"] == 7.0
+    assert next(t for t in detail["balance"]["types"] if t["leaveType"] == "PAID")["balance"] == 7.0
+    assert detail["earning"]["attendanceDaysNeeded"] == 22
     assert (
         world.client.get(
             f"/hr/v1/leave/employee/{emp['employeeId']}", headers=world.headers(pc)
@@ -305,12 +326,13 @@ def test_adjustment_changes_the_balance_through_the_ledger_and_history_cannot_be
     )
 
 
-def test_settings_change_the_allowance_for_new_grants(world):
+def test_settings_change_the_special_occasion_quota_for_new_grants(world):
     hr = world.grant(str(uuid.uuid4()), perm.HR_SETTINGS_MANAGE)
-    world.client.put(
+    r = world.client.put(
         "/hr/v1/settings",
-        json={"values": {"leave.sick_days_per_year": 8}},
+        json={"values": {"leave.special_days_per_year": 4}},
         headers=world.headers(hr),
     )
+    assert r.status_code == 200
     _, user = person(world)
-    assert balance(world, user)["balance"] == 8.0
+    assert balance(world, user, "SPECIAL")["balance"] == 4.0

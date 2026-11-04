@@ -79,10 +79,29 @@ The CEO can act at any step. HR sees everything but only approves what is assign
 
 ## 6. Leave
 
-- Types: **Sick** and **Earned**, **10 days in total per year**, six-day week, Sunday off **[ASSUMPTION: Sick 5 and Earned 5, granted at the start of the year; configurable]**. Unpaid leave is recorded as loss of pay when balance is exhausted and HR approves it.
-- Half-day supported. Days are computed on the server, skipping Sundays and holidays.
-- Balance is a **ledger** (grants, deductions, adjustments, reversals), never an editable counter.
-- Approval per section 3. The employee sees pending, approved, rejected, with reasons, and can cancel a pending request.
+**Rules from 4 Nov 2026 (product owner), replacing the yearly 5 Sick + 5 Earned:**
+
+- **Paid leave is earned from attendance.** Completing `leave.accrual_attendance_days` (22) days of
+  attendance earns `leave.accrual_paid_days` (1) paid leave. A day of attendance is a working day
+  with a check-in; it counts 0.5 when a late, early or out-of-fence exception on it was rejected. A
+  day whose exception is still waiting pauses the count until it is decided, so completed blocks
+  never change. Today and Sundays/declared holidays do not count (off-day work earns a comp-off).
+- **Cap.** The paid balance never goes above `leave.paid_balance_cap` (3). A block completed at the
+  cap earns nothing; `hr.leave_accrual` records it as lapsed, so every balance is traceable.
+- **No sick leave.** The yearly allowance still unused was withdrawn by an ADJUST ledger entry at the
+  switch-over (migration 0021); pending Sick/Earned requests became PAID.
+- **Special occasion leave**: paid, its own yearly quota (`leave.special_days_per_year`, 2), the
+  occasion is required, decided by the Team Lead like other leave.
+- **Comp-off**: off-day work approved on or after the switch-over date earns one comp-off day.
+- **Absent days** in the last 30 can be applied for as leave; `/leave/absences` lists them.
+- **Outlet cover**: the Team Lead sees, on a leave to approve, the dates on which the person's
+  outlet would have no other PC free.
+- Approval as in section 3: a PC's leave goes to the Team Lead or Project Manager. Unpaid leave goes
+  to HR. Half-day supported; days computed on the server; the ledger is append-only.
+- **Executive view** (`/oversight/approvers`): per Team Lead/Project Manager, what waits with them
+  (attendance, leave, claims), the oldest, how many are past the deadline (09:00 IST on the Monday
+  after the week it was raised in), decisions and average decision time over 30 days. An Executive
+  sees their projects; HR and the CEO see all.
 
 ## 7. Reimbursement
 

@@ -56,8 +56,18 @@ SPECS: dict[str, Spec] = {
         "Face match: lowest score accepted, out of 1000 (the model maker's own value is 363; higher flags more)",
         "Attendance",
     ),
-    "leave.sick_days_per_year": Spec("int", 5, 0, 60, "Sick leave days per year", "Leave"),
-    "leave.earned_days_per_year": Spec("int", 5, 0, 60, "Earned leave days per year", "Leave"),
+    "leave.accrual_attendance_days": Spec(
+        "int", 22, 1, 60, "Days of attendance that earn paid leave", "Leave"
+    ),
+    "leave.accrual_paid_days": Spec(
+        "int", 1, 1, 5, "Paid leave days earned for those days of attendance", "Leave"
+    ),
+    "leave.paid_balance_cap": Spec(
+        "int", 3, 0, 60, "Most paid leave days that can be accumulated", "Leave"
+    ),
+    "leave.special_days_per_year": Spec(
+        "int", 2, 0, 30, "Special occasion leave days per year", "Leave"
+    ),
     "claims.travel_monthly_limit": Spec(
         "money", 5000, 0, 10_000_000, "Travel limit per employee per month (₹)", "Reimbursement"
     ),

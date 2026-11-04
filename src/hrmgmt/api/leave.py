@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
@@ -25,9 +25,10 @@ router = APIRouter(prefix="/hr/v1", tags=["Leave"])
 
 can_review = require_permission(perm.HR_LEAVE_REVIEW)
 
-LeaveType = Literal["SICK", "EARNED", "UNPAID"]
+LeaveType = Literal["PAID", "SPECIAL", "COMP_OFF", "UNPAID"]
 _BACKDATE_DAYS = 30
 _ADVANCE_DAYS = 365
+_LABELS = {"PAID": "paid leave", "SPECIAL": "special occasion leave", "COMP_OFF": "comp-off"}
 
 
 class LeaveApply(BaseModel):
@@ -37,6 +38,8 @@ class LeaveApply(BaseModel):
     to_date: date
     half_day: bool = False
     reason: str | None = Field(default=None, max_length=500)
+    # What the Special occasion is (own marriage, a death in the family...). Required for SPECIAL.
+    occasion: str | None = Field(default=None, max_length=100)
 
 
 def _num(value: Decimal | None) -> float:
@@ -52,6 +55,7 @@ def _view(r: Any) -> dict[str, Any]:
         "halfDay": r["half_day"],
         "days": _num(r["days"]),
         "reason": r["reason"],
+        "occasion": r["occasion"],
         "status": r["status"],
         "approverRule": r["approver_rule"],
         "submittedAt": r["submitted_at"].isoformat(),
@@ -60,8 +64,8 @@ def _view(r: Any) -> dict[str, Any]:
     }
 
 
-def _balance_view(conn: Connection, employee_id: str, year: int) -> dict[str, Any]:
-    b = lr.balances(conn, employee_id, year)
+def _balance_view(conn: Connection, employee_id: str, year: int, today: date) -> dict[str, Any]:
+    b = lr.balances(conn, employee_id, year, today)
     return {
         "year": year,
         "types": [
@@ -86,7 +90,8 @@ def my_balance(
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     employee_id = _own_employee_id(conn, user)
-    return _balance_view(conn, employee_id, year or ist_date(clock()).year)
+    today = ist_date(clock())
+    return _balance_view(conn, employee_id, year or today.year, today)
 
 
 @router.get("/leave/requests")
@@ -102,6 +107,77 @@ def my_requests(
         {"e": employee_id},
     ).mappings()
     return {"items": [_view(r) for r in rows]}
+
+
+@router.get("/leave/earning")
+def my_earning(
+    user: HumanPrincipal = Depends(current_user),
+    clock: Clock = Depends(get_clock),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """How many days of attendance count so far towards the next paid leave, and what each
+    completed block earned (or lost to the cap)."""
+    employee_id = _own_employee_id(conn, user)
+    today = ist_date(clock())
+    lr.accrue(conn, employee_id, today)
+    return lr.progress(conn, employee_id, today)
+
+
+@router.get("/leave/absences")
+def my_absences(
+    user: HumanPrincipal = Depends(current_user),
+    clock: Clock = Depends(get_clock),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Working days in the last 30 with no check-in and no leave: each can still be applied for as
+    leave, so it is not left unexplained."""
+    employee_id = _own_employee_id(conn, user)
+    return {"dates": [d.isoformat() for d in unexplained_absences(conn, employee_id, clock())]}
+
+
+def unexplained_absences(conn: Connection, employee_id: str, now: datetime) -> list[date]:
+    today = ist_date(now)
+    start = today - timedelta(days=_BACKDATE_DAYS)
+    first = conn.execute(
+        text("SELECT min(work_date) FROM hr.attendance_day WHERE employee_id = CAST(:e AS uuid)"),
+        {"e": employee_id},
+    ).scalar()
+    if first is None:
+        return []  # nobody is marked absent before they ever used attendance
+    start = max(start, first)
+    end = today - timedelta(days=1)
+    if end < start:
+        return []
+    present = {
+        r[0]
+        for r in conn.execute(
+            text(
+                "SELECT work_date FROM hr.attendance_day WHERE employee_id = CAST(:e AS uuid)"
+                " AND check_in_at IS NOT NULL AND work_date BETWEEN :a AND :b"
+            ),
+            {"e": employee_id, "a": start, "b": end},
+        )
+    }
+    on_leave: set[date] = set()
+    for a, b in conn.execute(
+        text(
+            "SELECT from_date, to_date FROM hr.leave_request WHERE employee_id = CAST(:e AS uuid)"
+            " AND status IN ('PENDING', 'APPROVED') AND from_date <= :b AND to_date >= :a"
+        ),
+        {"e": employee_id, "a": start, "b": end},
+    ):
+        d = a
+        while d <= b:
+            on_leave.add(d)
+            d += timedelta(days=1)
+    holidays = lr.declared_holidays(conn, start, end)
+    out = []
+    d = start
+    while d <= end:
+        if d.weekday() != 6 and d not in holidays and d not in present and d not in on_leave:
+            out.append(d)
+        d += timedelta(days=1)
+    return out
 
 
 @router.post("/leave/requests", status_code=201)
@@ -125,6 +201,9 @@ def apply_leave(
     if body.to_date > today + timedelta(days=_ADVANCE_DAYS):
         raise ApiError(422, "LEAVE_DATES_INVALID", "That is too far ahead.")
     days = lr.leave_days(conn, body.from_date, body.to_date, body.half_day)
+    occasion = (body.occasion or "").strip() or None
+    if body.leave_type == "SPECIAL" and not occasion:
+        raise ApiError(422, "LEAVE_OCCASION_REQUIRED", "Say what the special occasion is.")
 
     # One request at a time per person, so two quick submissions cannot both pass the checks.
     conn.execute(
@@ -141,13 +220,13 @@ def apply_leave(
     if clash:
         raise conflict("LEAVE_OVERLAPS", "You already have leave on some of these dates.")
     if body.leave_type in lr.PAID:
-        info = lr.balances(conn, employee_id, body.from_date.year)[body.leave_type]
+        info = lr.balances(conn, employee_id, body.from_date.year, today)[body.leave_type]
         available = info["balance"] - info["pending"]
         if days > available:
             raise conflict(
                 "LEAVE_BALANCE_TOO_LOW",
-                f"You have {available:g} day(s) of {body.leave_type.lower()} leave available for "
-                f"{body.from_date.year}. Apply for unpaid leave for the rest.",
+                f"You have {available:g} day(s) of {_LABELS[body.leave_type]} available. "
+                "Apply for unpaid leave for the rest.",
             )
     rule = leave_rule(conn, authorizer, employee_id, body.leave_type, now)
     status = "APPROVED" if rule == "AUTO" else "PENDING"
@@ -155,8 +234,9 @@ def apply_leave(
         conn.execute(
             text(
                 "INSERT INTO hr.leave_request (employee_id, leave_type, from_date, to_date, half_day,"
-                " days, reason, status, approver_rule, decided_at, decided_by, decision_note)"
-                " VALUES (CAST(:e AS uuid), :t, :a, :b, :h, :d, :r, :s, :rule, :da, :db, :dn)"
+                " days, reason, occasion, status, approver_rule, submitted_at, decided_at, decided_by,"
+                " decision_note) VALUES (CAST(:e AS uuid), :t, :a, :b, :h, :d, :r, :o, :s, :rule,"
+                " :now, :da, :db, :dn)"
                 " RETURNING request_id"
             ),
             {
@@ -167,8 +247,10 @@ def apply_leave(
                 "h": body.half_day,
                 "d": days,
                 "r": (body.reason or "").strip() or None,
+                "o": occasion,
                 "s": status,
                 "rule": rule,
+                "now": now,
                 "da": now if status == "APPROVED" else None,
                 "db": user.user_id if status == "APPROVED" else None,
                 "dn": "Recorded without approval (CEO)." if status == "APPROVED" else None,
@@ -288,17 +370,95 @@ def leave_approvals(
         .all()
     )
     items = []
+    today = ist_date(now)
     for r in rows:
         if decides_leave(conn, authorizer, user, str(r["employee_id"]), r["approver_rule"], now):
-            items.append(
+            item = {
+                **_view(r),
+                "employeeId": str(r["employee_id"]),
+                "employeeName": r["full_name"],
+                "employeeCode": r["employee_code"],
+            }
+            if status == "PENDING":
+                eid = str(r["employee_id"])
+                if r["leave_type"] in lr.PAID:
+                    b = lr.balances(conn, eid, r["from_date"].year, today)[r["leave_type"]]
+                    item["balanceAvailable"] = _num(b["balance"])
+                item["coverWarnings"] = cover_warnings(
+                    conn, eid, r["from_date"], r["to_date"], r["half_day"], now
+                )
+            items.append(item)
+    return {"items": items}
+
+
+def cover_warnings(
+    conn: Connection, employee_id: str, start: date, end: date, half_day: bool, now: datetime
+) -> list[dict[str, Any]]:
+    """For each outlet where this person is a PC: the working days of the leave on which no other
+    PC of that outlet is free (every other one is on leave, approved or waiting). A half day leaves
+    the person there for part of the day, so it never leaves an outlet uncovered."""
+    if half_day:
+        return []
+    user_id = conn.execute(
+        text("SELECT security_user_id FROM hr.employee WHERE employee_id = CAST(:e AS uuid)"),
+        {"e": employee_id},
+    ).scalar()
+    if user_id is None:
+        return []
+    outlets = conn.execute(
+        text(
+            "SELECT DISTINCT outlet_id, outlet_name FROM hr.work_assignment"
+            " WHERE security_user_id = CAST(:u AS uuid) AND role_code = 'PC'"
+            " AND outlet_id IS NOT NULL AND valid_from <= :n AND (valid_to IS NULL OR valid_to > :n)"
+        ),
+        {"u": str(user_id), "n": now},
+    ).all()
+    holidays = lr.declared_holidays(conn, start, end)
+    days = []
+    d = start
+    while d <= end:
+        if d.weekday() != 6 and d not in holidays:
+            days.append(d)
+        d += timedelta(days=1)
+    out = []
+    for outlet_id, outlet_name in outlets:
+        others = [
+            str(r[0])
+            for r in conn.execute(
+                text(
+                    "SELECT DISTINCT e.employee_id FROM hr.work_assignment w"
+                    " JOIN hr.employee e ON e.security_user_id = w.security_user_id"
+                    " WHERE w.outlet_id = CAST(:o AS uuid) AND w.role_code = 'PC'"
+                    " AND w.valid_from <= :n AND (w.valid_to IS NULL OR w.valid_to > :n)"
+                    " AND e.employee_id <> CAST(:e AS uuid) AND e.employment_status = 'ACTIVE'"
+                ),
+                {"o": str(outlet_id), "n": now, "e": employee_id},
+            )
+        ]
+        away: dict[str, set[date]] = {o: set() for o in others}
+        if others:
+            for eid, a, b in conn.execute(
+                text(
+                    "SELECT CAST(employee_id AS text), from_date, to_date FROM hr.leave_request"
+                    " WHERE employee_id = ANY(CAST(:ids AS uuid[])) AND NOT half_day"
+                    " AND status IN ('PENDING', 'APPROVED') AND from_date <= :b AND to_date >= :a"
+                ),
+                {"ids": others, "a": start, "b": end},
+            ):
+                x = a
+                while x <= b:
+                    away[eid].add(x)
+                    x += timedelta(days=1)
+        uncovered = [day for day in days if all(day in away[o] for o in others)]
+        if uncovered:
+            out.append(
                 {
-                    **_view(r),
-                    "employeeId": str(r["employee_id"]),
-                    "employeeName": r["full_name"],
-                    "employeeCode": r["employee_code"],
+                    "outletName": outlet_name,
+                    "otherPcs": len(others),
+                    "dates": [day.isoformat() for day in uncovered],
                 }
             )
-    return {"items": items}
+    return out
 
 
 class LeaveDecision(BaseModel):
@@ -339,7 +499,7 @@ def decide_leave(
     status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
     if status == "APPROVED" and row["leave_type"] in lr.PAID:
         year = row["from_date"].year
-        balance = lr.balances(conn, employee_id, year)[row["leave_type"]]["balance"]
+        balance = lr.balances(conn, employee_id, year, ist_date(now))[row["leave_type"]]["balance"]
         if row["days"] > balance:
             raise conflict(
                 "LEAVE_BALANCE_TOO_LOW", "The balance is no longer enough for this leave."
@@ -395,7 +555,7 @@ def reverse_leave(
         raise not_found("Leave request not found.")
     if row["status"] != "APPROVED":
         raise conflict("LEAVE_NOT_APPROVED", "Only an approved leave can be reversed.")
-    if row["leave_type"] in lr.PAID:
+    if row["leave_type"] in lr.PAID + lr.LEGACY:
         conn.execute(
             text(
                 "INSERT INTO hr.leave_ledger (employee_id, leave_type, leave_year, entry_type, days, request_id, note, created_by)"
@@ -430,7 +590,7 @@ def reverse_leave(
 
 class Adjustment(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    leave_type: Literal["SICK", "EARNED"]
+    leave_type: Literal["PAID", "SPECIAL", "COMP_OFF"]
     year: int = Field(ge=2020, le=2100)
     days: Decimal = Field(max_digits=4, decimal_places=1)
     note: str = Field(min_length=3, max_length=300)
@@ -442,6 +602,7 @@ def adjust_balance(
     body: Adjustment,
     request: Request,
     user: HumanPrincipal = Depends(can_review),
+    clock: Clock = Depends(get_clock),
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     eid = _uuid(employee_id)
@@ -483,7 +644,7 @@ def adjust_balance(
         },
         request=request,
     )
-    return _balance_view(conn, eid, body.year)
+    return _balance_view(conn, eid, body.year, ist_date(clock()))
 
 
 @router.get("/leave/employee/{employee_id}")
@@ -508,8 +669,10 @@ def employee_leave(
         ),
         {"e": eid},
     ).mappings()
+    today = ist_date(clock())
     return {
-        "balance": _balance_view(conn, eid, year or ist_date(clock()).year),
+        "balance": _balance_view(conn, eid, year or today.year, today),
+        "earning": lr.progress(conn, eid, today),
         "requests": [_view(r) for r in rows],
     }
 
@@ -522,7 +685,8 @@ def leave_overview(
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     """HR: every active employee's balances for the year."""
-    y = year or ist_date(clock()).year
+    today = ist_date(clock())
+    y = year or today.year
     ids = [
         (str(r[0]), r[1], r[2])
         for r in conn.execute(
@@ -533,7 +697,7 @@ def leave_overview(
     ]
     items = []
     for eid, code, name in ids:
-        b = _balance_view(conn, eid, y)
+        b = _balance_view(conn, eid, y, today)
         items.append(
             {"employeeId": eid, "employeeCode": code, "fullName": name, "types": b["types"]}
         )
