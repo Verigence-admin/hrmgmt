@@ -76,10 +76,8 @@ def test_nobody_starts_with_paid_leave_only_the_special_occasion_quota(world):
     }
     # reading again does not grant again
     assert balance(world, user, "SPECIAL")["balance"] == 2.0
-    # the old app still sends Sick or Earned: taken as paid leave, checked against its balance
     for old in ("SICK", "EARNED"):
-        r = apply(world, user, leave_type=old)
-        assert r.status_code == 409 and r.json()["code"] == "LEAVE_BALANCE_TOO_LOW"
+        assert apply(world, user, leave_type=old).status_code == 422
 
 
 def test_a_range_counts_working_days_only(world):

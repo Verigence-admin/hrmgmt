@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Connection, text
 
 from hrmgmt import leave_rules as lr
@@ -26,9 +26,6 @@ router = APIRouter(prefix="/hr/v1", tags=["Leave"])
 can_review = require_permission(perm.HR_LEAVE_REVIEW)
 
 LeaveType = Literal["PAID", "SPECIAL", "COMP_OFF", "UNPAID"]
-# The Android app installed on phones before Nov 2026 still offers Sick and Earned leave. Until
-# everyone has the new app, those requests are taken as paid leave (the only paid leave now).
-_LEGACY_APPLY = {"SICK": "PAID", "EARNED": "PAID"}
 _BACKDATE_DAYS = 30
 _ADVANCE_DAYS = 365
 _LABELS = {"PAID": "paid leave", "SPECIAL": "special occasion leave", "COMP_OFF": "comp-off"}
@@ -37,12 +34,6 @@ _LABELS = {"PAID": "paid leave", "SPECIAL": "special occasion leave", "COMP_OFF"
 class LeaveApply(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     leave_type: LeaveType
-
-    @field_validator("leave_type", mode="before")
-    @classmethod
-    def _legacy_type(cls, value: Any) -> Any:
-        return _LEGACY_APPLY.get(value, value) if isinstance(value, str) else value
-
     from_date: date
     to_date: date
     half_day: bool = False
