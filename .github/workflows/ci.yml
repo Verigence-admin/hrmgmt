@@ -55,52 +55,7 @@ jobs:
       - name: The image carries the migrations
         run: docker run --rm hrmgmt-ci sh -c "PYTHONPATH=src alembic heads"
 
-  # myHR DEV is deployed only from here, after the tests and the image check pass on dev
-  # (product owner rule: deploys go through GitHub Actions, never a direct Railway upload).
-  deploy-dev:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
-    needs: [test, image]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    concurrency:
-      group: hrmgmt-dev-deploy
-      cancel-in-progress: false
-    env:
-      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
-      PLATFORM_PROJECT_ID: cf00a1cd-623e-4c72-8836-db95652c63db
-      HR_SERVICE: HRMgmt
-      DEPLOY_SHA: ${{ github.sha }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Railway CLI
-        run: npm install --global @railway/cli
-      - name: Link the myHR Railway DEV service
-        shell: bash
-        run: |
-          set -euo pipefail
-          [ -n "${RAILWAY_API_TOKEN:-}" ] || { echo '::error::RAILWAY_API_TOKEN secret is not configured for this repository.'; exit 1; }
-          railway link --project "$PLATFORM_PROJECT_ID" --environment dev --service "$HR_SERVICE" --json >/dev/null
-      - name: Deploy myHR
-        shell: bash
-        run: |
-          set -euo pipefail
-          railway deployment list --service "$HR_SERVICE" --limit 1 --json >/tmp/before.json
-          previous="$(python3 -c "import json;r=json.load(open('/tmp/before.json'));print(r[0].get('id','') if r else '')")"
-          echo "PREVIOUS_DEPLOYMENT_ID=$previous" >> "$GITHUB_ENV"
-          railway up . --path-as-root --service "$HR_SERVICE" --detach --yes \
-            --message "myHR DEV ${DEPLOY_SHA}" >/dev/null
-      - name: Verify the new deployment is live
-        shell: bash
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 40); do
-            railway deployment list --service "$HR_SERVICE" --limit 1 --json >/tmp/now.json
-            read -r id status <<<"$(python3 -c "import json;r=json.load(open('/tmp/now.json'));print(r[0].get('id',''), r[0].get('status','')) if r else print(' ')")"
-            if [[ -z "$id" || "$id" == "${PREVIOUS_DEPLOYMENT_ID:-}" ]]; then sleep 10; continue; fi
-            case "$status" in
-              SUCCESS) echo "MYHR_DEPLOYMENT=PASS $id"; exit 0 ;;
-              FAILED|CRASHED|REMOVED) echo "::error::myHR deployment $id ended $status"; exit 1 ;;
-              *) echo "Deployment $id is $status (attempt $attempt/40)"; sleep 15 ;;
-            esac
-          done
-          echo "::error::myHR deployment did not finish in time"; exit 1
+
+# myHR DEV is deployed by "Deploy myHR DEV" in verigence/verigence-audit-core, which holds the
+# Railway token (this repository cannot read the verigence organisation's secrets): the dev commit
+# to release goes in that repository's deploy/hrmgmt-dev.sha, and it must have passed the jobs above.
