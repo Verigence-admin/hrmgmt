@@ -211,6 +211,7 @@ class World:
         outlet: tuple[str, float, float] | None = None,
         valid_from: datetime | None = None,
         project: tuple[str, str] = ("P1", "Project One"),
+        outlet_id: str | None = None,
     ) -> None:
         with self.engine.begin() as conn:
             conn.execute(
@@ -226,7 +227,7 @@ class World:
                     "pc": project[0],
                     "pn": project[1],
                     "r": role,
-                    "o": str(uuid.uuid4()) if outlet else None,
+                    "o": (outlet_id or str(uuid.uuid4())) if outlet else None,
                     "on": outlet[0] if outlet else None,
                     "la": outlet[1] if outlet else None,
                     "lo": outlet[2] if outlet else None,
