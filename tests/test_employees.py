@@ -843,7 +843,9 @@ def test_photo_is_resized_stripped_of_metadata_and_served_back(make_client, migr
     raw = _jpeg_with_gps()
     assert b"SecretCameraMake" in raw
     r = client.post(
-        "/hr/v1/me/employee/photo", files={"file": ("me.jpg", raw, "image/jpeg")}, headers=auth(me)
+        f"/hr/v1/employees/{emp['employeeId']}/photo",
+        files={"file": ("me.jpg", raw, "image/jpeg")},
+        headers=auth(HR),
     )
     assert r.status_code == 200 and r.json()["hasPhoto"] is True
     stored, content_type = storage.objects[f"employee/{emp['employeeId']}/photo.jpg"]
@@ -864,6 +866,19 @@ def test_photo_is_resized_stripped_of_metadata_and_served_back(make_client, migr
         == 403
     )
     assert audit_rows(migrated_engine, emp["employeeId"])[-1][0] == "PHOTO_CHANGED"
+
+
+def test_an_employee_cannot_change_their_own_photo_only_hr_can(make_client, migrated_engine):
+    storage = FakeStorage()
+    client, _ = make_client(storage=storage)
+    _, me = _linked_employee(client, migrated_engine)
+    r = client.post(
+        "/hr/v1/me/employee/photo",
+        files={"file": ("me.jpg", _jpeg_with_gps((50, 50)), "image/jpeg")},
+        headers=auth(me),
+    )
+    assert r.status_code == 403 and "Only HR" in r.json()["detail"]
+    assert storage.objects == {}
 
 
 def test_photo_is_optional_and_missing_photo_is_a_clean_404(make_client, migrated_engine):
@@ -887,9 +902,11 @@ def test_non_images_are_refused_without_touching_the_record(
 ):
     storage = FakeStorage()
     client, _ = make_client(storage=storage)
-    _, me = _linked_employee(client, migrated_engine)
+    emp, me = _linked_employee(client, migrated_engine)
     r = client.post(
-        "/hr/v1/me/employee/photo", files={"file": (name, data, "image/jpeg")}, headers=auth(me)
+        f"/hr/v1/employees/{emp['employeeId']}/photo",
+        files={"file": (name, data, "image/jpeg")},
+        headers=auth(HR),
     )
     assert r.status_code == 422 and r.json()["code"] == "HR_PHOTO_NOT_ACCEPTED"
     assert storage.objects == {}
@@ -898,10 +915,12 @@ def test_non_images_are_refused_without_touching_the_record(
 
 def test_oversize_photo_is_refused(make_client, migrated_engine):
     client, _ = make_client()
-    _, me = _linked_employee(client, migrated_engine)
+    emp, _ = _linked_employee(client, migrated_engine)
     big = b"\xff\xd8\xff" + b"0" * (5 * 1024 * 1024 + 10)
     r = client.post(
-        "/hr/v1/me/employee/photo", files={"file": ("a.jpg", big, "image/jpeg")}, headers=auth(me)
+        f"/hr/v1/employees/{emp['employeeId']}/photo",
+        files={"file": ("a.jpg", big, "image/jpeg")},
+        headers=auth(HR),
     )
     assert r.status_code == 422 and "5 MB" in r.json()["detail"]
 
@@ -911,11 +930,11 @@ def test_storage_outage_or_missing_storage_is_503_and_leaves_no_photo_flag(
 ):
     for storage in (FakeStorage(fail=True), None):
         client, _ = make_client(storage=storage)
-        _, me = _linked_employee(client, migrated_engine)
+        emp, me = _linked_employee(client, migrated_engine)
         r = client.post(
-            "/hr/v1/me/employee/photo",
+            f"/hr/v1/employees/{emp['employeeId']}/photo",
             files={"file": ("a.jpg", _jpeg_with_gps((50, 50)), "image/jpeg")},
-            headers=auth(me),
+            headers=auth(HR),
         )
         assert r.status_code == 503
         assert client.get("/hr/v1/me/employee", headers=auth(me)).json()["hasPhoto"] is False

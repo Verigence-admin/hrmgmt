@@ -18,7 +18,7 @@ from hrmgmt import validators as v
 from hrmgmt.audit import record_audit
 from hrmgmt.catalog import STATES, canonical_department, canonical_state
 from hrmgmt.db import get_conn
-from hrmgmt.errors import ApiError, conflict, dependency_unavailable, not_found
+from hrmgmt.errors import ApiError, conflict, dependency_unavailable, forbidden, not_found
 from hrmgmt.faceidentity import save_profile_face
 from hrmgmt.facematch import embed
 from hrmgmt.passwords import generate_initial_password
@@ -1499,22 +1499,15 @@ def get_employee_photo(
 
 
 @router.post("/me/employee/photo")
-async def set_my_photo(
-    request: Request,
-    file: UploadFile = File(...),
+def set_my_photo(
     user: HumanPrincipal = Depends(current_user),
-    storage: ObjectStorage | None = Depends(get_storage),
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    employee_id = _own_employee_id(conn, user)
-    return _save_photo(
-        conn,
-        employee_id=employee_id,
-        data=await _upload_bytes(file),
-        storage=storage,
-        actor=user.user_id,
-        request=request,
-    )
+    """Refused for everyone (product owner, 4 Nov 2026): the profile photo is the face attendance is
+    compared with, so only HR changes it (POST /employees/{id}/photo). Kept so an older app gets a
+    clear answer instead of a missing route."""
+    _own_employee_id(conn, user)
+    raise forbidden("Only HR can change your profile photo. Ask HR to update it.")
 
 
 @router.get("/me/employee/photo")
