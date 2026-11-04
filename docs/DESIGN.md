@@ -62,7 +62,7 @@ The CEO can act at any step. HR sees everything but only approves what is assign
 
 **Employee fields:** identity (code, name, DOB, gender), contact (mobile, personal email, secondary email, address), emergency contact (name, relation, number), qualification, designation, department, joining date, employment status, project tag, photo, documents, bank (account, IFSC, holder), PAN, Aadhaar, UAN and ESI numbers.
 
-**Employee can edit (self-service):** address, emergency contact number, secondary email, own photo. Everything else is read-only to the employee and changed by HR with an audit entry. Edits to sensitive fields (bank, PAN) by HR require a reason.
+**Employee can edit (self-service):** address, emergency contact number, secondary email. The profile photo is changed only by HR (4 Nov 2026: it is the face attendance is compared with). Everything else is read-only to the employee and changed by HR with an audit entry. Edits to sensitive fields (bank, PAN) by HR require a reason.
 
 **Sensitive data:** you decided PAN and Aadhaar are stored in full, unencrypted in the database. I will still enforce: field-level API access (only the employee themselves, HRAdmin, FinanceAdmin for bank, CEO), masked display by default with an explicit "reveal" action that is audited, no sensitive values in logs or error messages, no sensitive values in list endpoints. Document files (identity proofs, certificates) go to a private bucket, downloaded only through short-lived signed links issued after an access check, each issue audited. **[Risk noted once: Aadhaar storage has legal restrictions; please have your CA or lawyer confirm.]**
 
