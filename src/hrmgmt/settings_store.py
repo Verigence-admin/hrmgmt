@@ -33,6 +33,14 @@ SPECS: dict[str, Spec] = {
     "attendance.check_out_standard": Spec(
         "time", "18:30", label="Standard check-out time", group="Attendance"
     ),
+    "attendance.grace_per_month": Spec(
+        "int",
+        1,
+        0,
+        10,
+        "Late check-ins and early check-outs together allowed per month before they count in payroll",
+        "Attendance",
+    ),
     "attendance.geofence_radius_m": Spec(
         "int", 500, 50, 5000, "Geofence radius for PCs (metres)", "Attendance"
     ),

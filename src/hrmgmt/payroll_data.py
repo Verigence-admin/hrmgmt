@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy import Connection, text
 
+from hrmgmt import attendance_grace as grace
 from hrmgmt import payroll_calc as pcalc
 from hrmgmt.claim_rules import add_months
 from hrmgmt.timeutil import is_sunday
@@ -145,6 +146,8 @@ def build_line(
         unpaid_leave_days=unpaid_leave,
         extra_lop_days=extra_lop,
         before_joining_days=before,
+        half_day_lop=grace.half_days(conn, str(employee["employee_id"]), month),
+        late_early_beyond_grace=grace.beyond_grace(conn, str(employee["employee_id"]), month),
     )
     figures = pcalc.compute_line(
         structure=list(structure["components"]),

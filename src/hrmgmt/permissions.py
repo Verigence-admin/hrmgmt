@@ -30,6 +30,8 @@ HR_PAYROLL_APPROVE = "hr.payroll.approve"
 HR_SUPPORT_MANAGE = "hr.support.manage"
 # Clearing old attendance, leave and reimbursement records. Like support, only SuperAdmin passes it.
 HR_HOUSEKEEPING_MANAGE = "hr.housekeeping.manage"
+# Restoring a Team Lead paused for approvals past the Monday deadline. Only SuperAdmin passes it.
+HR_ACCESS_PAUSE_MANAGE = "hr.access_pause.manage"
 
 # Shown to the UI by GET /hr/v1/me so it can choose navigation. The server still re-checks
 # every protected request; the UI list is a convenience, never the authority.
@@ -52,4 +54,5 @@ ALL_PERMISSIONS: tuple[str, ...] = (
     HR_PAYROLL_APPROVE,
     HR_SUPPORT_MANAGE,
     HR_HOUSEKEEPING_MANAGE,
+    HR_ACCESS_PAUSE_MANAGE,
 )

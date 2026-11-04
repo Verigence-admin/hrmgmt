@@ -18,6 +18,7 @@ from hrmgmt import settings_store as cfg
 from hrmgmt import workcontext as wc
 from hrmgmt.api.employees import _own_employee_id
 from hrmgmt.approvals import decides_attendance
+from hrmgmt.attendance_grace import LATE_EARLY, grace_view
 from hrmgmt.audit import record_audit
 from hrmgmt.authz import Authorizer
 from hrmgmt.db import get_conn
@@ -176,6 +177,33 @@ def _exceptions_needed(
     return fenced, distance, outlet, kinds, flags
 
 
+def _distance_text(metres: float) -> str:
+    return f"{round(metres)} m" if metres < 1000 else f"{metres / 1000:.1f} km"
+
+
+def _reason_prompt(
+    kinds: list[str],
+    distance: float | None,
+    outlet: dict[str, Any] | None,
+    values: dict[str, Any],
+    event: str,
+) -> str:
+    parts = []
+    if "OUT_OF_FENCE" in kinds and distance is not None:
+        where = f" from {outlet['outlet_name']}" if outlet and outlet.get("outlet_name") else ""
+        parts.append(
+            f"You are {_distance_text(distance)}{where} (the limit is "
+            f"{int(values['attendance.geofence_radius_m'])} m)."
+        )
+    if "LATE_CHECK_IN" in kinds:
+        parts.append(f"You are checking in after {values['attendance.late_after']}.")
+    if "EARLY_CHECK_OUT" in kinds:
+        parts.append(f"You are checking out before {values['attendance.check_out_earliest']}.")
+    side = "check-in" if event == "CHECK_IN" else "check-out"
+    parts.append(f"Say why; your Team Lead will review this {side}.")
+    return " ".join(parts)
+
+
 def _record_event(
     event: Event,
     request: Request,
@@ -266,12 +294,15 @@ def _record_event(
         if event == "CHECK_IN":
             kinds.append("OFF_DAY_WORK")
             flags.append("OFF_DAY")
-    if "OUT_OF_FENCE" in kinds and not (reason and reason.strip()):
+    needs_reason = [k for k in kinds if k in ("OUT_OF_FENCE", "LATE_CHECK_IN", "EARLY_CHECK_OUT")]
+    if needs_reason and not (reason and reason.strip()):
         # The token is not used up: the person adds a reason and sends the same photo again.
+        # Product owner (4 Nov 2026): a late check-in or early check-out needs a reason too, and the
+        # message says how far away the person is.
         raise ApiError(
             422,
             "ATTENDANCE_REASON_REQUIRED",
-            "You are not at your tagged location. Say why, and your Team Lead or Project Manager will review it.",
+            _reason_prompt(needs_reason, distance, outlet, values, event),
         )
 
     # The token: one use, for this person and this event, still within its window.
@@ -988,6 +1019,9 @@ def pending_attendance_exceptions(
                 if r[f"{side}_distance_m"] is not None
                 else None,
                 "outletName": r[f"{side}_outlet_name"],
+                "grace": grace_view(conn, eid, r["work_date"], str(r["exception_id"]))
+                if r["kind"] in LATE_EARLY
+                else None,
             }
         )
     return {"items": items}
