@@ -23,6 +23,10 @@ logger = structlog.get_logger(__name__)
 
 REASON = "Approvals waiting with you passed the Monday 09:00 deadline"
 
+# The rule was announced on 5 Nov 2026: the first deadline enforced is the Monday after. Earlier
+# Mondays are never processed, so no one is paused for a week in which the rule did not exist.
+FIRST_DEADLINE = datetime(2026, 11, 9, 9, 0, tzinfo=IST)
+
 
 def latest_deadline(now: datetime) -> datetime:
     """The most recent Monday 09:00 IST at or before `now`."""
@@ -60,6 +64,8 @@ def run_deadline(
     paused, or None when this deadline was already processed."""
     now = now or utc_now()
     deadline = latest_deadline(now)
+    if deadline < FIRST_DEADLINE:
+        return None
     with engine.begin() as conn:
         done = conn.execute(
             text("SELECT 1 FROM hr.approver_deadline_run WHERE deadline_at = :d FOR UPDATE"),

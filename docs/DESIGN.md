@@ -108,7 +108,7 @@ The CEO can act at any step. HR sees everything but only approves what is assign
   Security (both Team Leads when a project has two; Project Managers are not paused). Each Monday is
   processed once (`hr.approver_deadline_run`); each pause is kept in `hr.approver_pause` with the late
   requests. SuperAdmin restores access from myHR Settings with a note (audited); restoring closes all of
-  that person's open pauses.
+  that person's open pauses. The first Monday enforced is 9 Nov 2026 (the rule was set on 5 Nov).
 
 ## 7. Reimbursement
 
