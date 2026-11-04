@@ -9,7 +9,7 @@ from datetime import date, datetime
 from sqlalchemy import text
 
 from hrmgmt import permissions as perm
-from hrmgmt.approver_deadline import latest_deadline, run_deadline
+from hrmgmt.approver_deadline import FIRST_DEADLINE, latest_deadline, run_deadline
 from hrmgmt.timeutil import IST
 from tests.support import ist
 from tests.test_leave import apply, person
@@ -104,3 +104,15 @@ def test_nothing_late_pauses_nobody_and_a_security_refusal_is_kept_for_superadmi
             text("SELECT security_paused, security_error FROM hr.approver_pause")
         ).one()
     assert row[0] is False and "SECURITY_UNAVAILABLE" in row[1]
+
+
+def test_no_monday_before_the_rule_started_is_ever_processed(world):
+    _reset(world)
+    emp, _ = person(world, "PC")
+    person(world, "TL")
+    late = attend(world, emp["employeeId"], [date(2026, 10, 28)], exception="PENDING")
+    _raised(world, late[0], "2026-10-28T11:30:00+05:30")  # due 2 Nov 09:00, before the rule
+    provisioner = world.app.state.provisioner
+    assert run_deadline(world.engine, provisioner, now=ist(2026, 11, 5, 10, 0)) is None
+    assert not getattr(provisioner, "paused", [])
+    assert FIRST_DEADLINE == datetime(2026, 11, 9, 9, 0, tzinfo=IST)
