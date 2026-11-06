@@ -343,3 +343,19 @@ approves like any other.
 Every employee's department was cleared when the fixed list was introduced (one audit entry,
 `DEPARTMENTS_CLEARED`, records how many). Only HR and above (`hr.employee.manage`) can set it; an
 employee sees their own department but any attempt to send one on the self-service route is refused.
+
+## 32. Night control on file downloads (product owner, 6 November 2026)
+
+From 20:00 to 08:30 IST nobody downloads a Verigence file unless SuperAdmin gave them access;
+SuperAdmin and Executive are never blocked. Security owns the policy and decides (window,
+exemptions, grants); myHR does not repeat any of it. Each file route asks Security
+(`POST /security/v1/service/night-control/check`, feature `FILE_DOWNLOAD`, with myHR's service
+token) through one shared dependency (`night_control.night_file_download`), and a blocked person
+gets `403 {"code": "NIGHT_MODE", "detail": "Night Mode On"}`. Each person's answer is reused for
+60 seconds, so a grant or the end of the window shows within a minute. If Security cannot answer
+(down, an error, an unexpected reply) the file is served and a warning is logged; without Security
+configured nothing is checked.
+
+Guarded: attendance photo (`/attendance/{id}/photo/{event}`), the attendance Excel report, claim
+receipts, payslip PDFs and support-ticket files. Profile photos (`/employees/{id}/photo`,
+`/me/employee/photo`) are not guarded: they are the avatars the screens show, not downloads.

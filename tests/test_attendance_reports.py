@@ -9,7 +9,7 @@ from openpyxl import load_workbook
 from sqlalchemy import text
 
 from hrmgmt import permissions as perm
-from tests.support import FAR, NEAR, OUTLET, World, ist
+from tests.support import FAR, NEAR, OUTLET, World, assert_night_guarded, ist
 from tests.test_attendance import send, token
 
 SECOND = ("Bhubaneswar Motors", 20.2961, 85.8245)
@@ -316,6 +316,13 @@ def test_the_report_is_an_excel_file_with_every_row_and_the_delinquencies(world,
             ).scalar_one()
             >= 1
         )
+    assert_night_guarded(
+        world.client,
+        world.app,
+        "/hr/v1/attendance/report",
+        world.headers(keeper),
+        params={"from": "2026-10-05", "to": "2026-10-05"},
+    )
 
 
 @pytest.mark.parametrize(

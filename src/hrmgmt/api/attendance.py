@@ -28,6 +28,7 @@ from hrmgmt.faceidentity import profile_face
 from hrmgmt.facematch import embed, similarity
 from hrmgmt.geo import haversine_m
 from hrmgmt.geocode import ReverseGeocoder
+from hrmgmt.night_control import night_file_download
 from hrmgmt.principal import current_user, get_authorizer, has_permission, require_permission
 from hrmgmt.security import HumanPrincipal
 from hrmgmt.stamp import StampError, exif_capture_time, read_photo, stamp_photo
@@ -897,7 +898,9 @@ def employee_attendance(
     return {"month": first.strftime("%Y-%m"), "days": _days(conn, eid, first, nxt)}
 
 
-@router.get("/attendance/{attendance_id}/photo/{event}")
+@router.get(
+    "/attendance/{attendance_id}/photo/{event}", dependencies=[Depends(night_file_download)]
+)
 def attendance_photo(
     attendance_id: str,
     event: Literal["in", "out"],

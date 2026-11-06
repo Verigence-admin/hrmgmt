@@ -19,6 +19,7 @@ from hrmgmt.attendance_report import MAX_RANGE_DAYS, Row, build_rows, delinquenc
 from hrmgmt.audit import record_audit
 from hrmgmt.db import get_conn
 from hrmgmt.errors import ApiError
+from hrmgmt.night_control import night_file_download
 from hrmgmt.principal import require_permission
 from hrmgmt.security import HumanPrincipal
 from hrmgmt.timeutil import Clock, ist_date, to_ist
@@ -113,7 +114,7 @@ def _delinquency_text(row: Row) -> str:
     )
 
 
-@router.get("/attendance/report")
+@router.get("/attendance/report", dependencies=[Depends(night_file_download)])
 def attendance_report(
     request: Request,
     start: Annotated[str | None, Query(alias="from", max_length=10)] = None,

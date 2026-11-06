@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from hrmgmt import claim_rules as cr
 from hrmgmt import permissions as perm
-from tests.support import OUTLET, World, ist, jpeg
+from tests.support import OUTLET, World, assert_night_guarded, ist, jpeg
 
 
 @pytest.fixture()
@@ -416,6 +416,7 @@ def test_receipts_open_for_the_owner_reviewers_and_the_team_lead_with_views_reco
             {"e": emp["employeeId"]},
         ).scalar_one()
     assert views == 2  # the owner's own view is not logged
+    assert_night_guarded(world.client, world.app, path, world.headers(pc))
 
 
 def test_hr_and_finance_can_follow_every_claim_others_cannot(world):

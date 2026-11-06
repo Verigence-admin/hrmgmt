@@ -21,6 +21,7 @@ from hrmgmt.audit import record_audit
 from hrmgmt.authz import Authorizer
 from hrmgmt.db import get_conn
 from hrmgmt.errors import ApiError, dependency_unavailable, not_found
+from hrmgmt.night_control import night_file_download
 from hrmgmt.principal import current_user, get_authorizer, has_permission, require_permission
 from hrmgmt.security import HumanPrincipal
 from hrmgmt.storage import ObjectStorage, StorageError
@@ -416,7 +417,7 @@ def update_ticket(
     return {"ticketId": tid, "status": row[0], "adminNote": row[1]}
 
 
-@router.get("/tickets/{ticket_id}/files/{file_id}")
+@router.get("/tickets/{ticket_id}/files/{file_id}", dependencies=[Depends(night_file_download)])
 def ticket_file(
     ticket_id: str,
     file_id: str,
