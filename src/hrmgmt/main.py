@@ -13,6 +13,7 @@ from sqlalchemy import text
 from hrmgmt.api.access_pauses import router as access_pauses_router
 from hrmgmt.api.admin import router as admin_router
 from hrmgmt.api.attendance import router as attendance_router
+from hrmgmt.api.attendance_corrections import router as attendance_corrections_router
 from hrmgmt.api.attendance_reports import router as attendance_reports_router
 from hrmgmt.api.claims import router as claims_router
 from hrmgmt.api.contact_changes import router as contact_changes_router
@@ -123,6 +124,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(admin_router)
     app.include_router(attendance_router)
+    app.include_router(attendance_corrections_router)
     app.include_router(attendance_reports_router)
     app.include_router(leave_router)
     app.include_router(oversight_router)

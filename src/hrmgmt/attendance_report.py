@@ -13,6 +13,7 @@ from typing import Any
 
 from sqlalchemy import Connection, text
 
+from hrmgmt.attendance_correction import live_by_day
 from hrmgmt.timeutil import IST
 
 MAX_RANGE_DAYS = 31
@@ -28,6 +29,8 @@ DELINQUENCY_LABELS = {
     "FACE_MISMATCH": "Face does not match",
     "OFF_DAY_WORK": "Worked on an off day",
     "SHORT_DAY": "Fewer than the minimum hours",
+    "CORRECTION_FULL_DAY": "Correction asked: full day",
+    "CORRECTION_HALF_DAY": "Correction asked: half day",
 }
 # These three belong to one punch, so they say which: "No face found in the check-out photo".
 _PER_PUNCH = {
@@ -84,6 +87,7 @@ class Row:
     has_check_in_photo: bool = False
     has_check_out_photo: bool = False
     delinquencies: list[dict[str, Any]] = field(default_factory=list)
+    correction: dict[str, Any] | None = None
 
     @property
     def hours(self) -> float | None:
@@ -171,6 +175,7 @@ def build_rows(
             params,
         ).mappings()
     ]
+    corrections = live_by_day(conn, first, last)
     holidays = {
         r[0]
         for r in conn.execute(
@@ -213,7 +218,9 @@ def build_rows(
             for project in projects:
                 if project_code and project["projectCode"] != project_code:
                     continue
-                rows.append(_row(emp, eid, day, record, exceptions, on_leave, project, today=today))
+                row = _row(emp, eid, day, record, exceptions, on_leave, project, today=today)
+                _apply_correction(row, corrections.get((eid, day)))
+                rows.append(row)
         day += timedelta(days=1)
     return rows
 
@@ -315,6 +322,27 @@ def _row(
     return row
 
 
+def _apply_correction(row: Row, correction: dict[str, Any] | None) -> None:
+    """A pending correction waits like an exception; an approved one is what the day counts, so the
+    day is no longer absent. What happened on the day stays listed alongside it."""
+    if correction is None:
+        return
+    row.correction = correction
+    row.delinquencies.append(
+        {
+            "code": f"CORRECTION_{correction['requested']}",
+            "status": correction["status"],
+            "reason": correction["reason"],
+            "side": None,
+        }
+    )
+    if correction["status"] == "APPROVED":
+        row.delinquencies = [d for d in row.delinquencies if d["code"] != "ABSENT"]
+        row.status = "CORRECTED"
+    elif row.status in ("ABSENT", "MISSING_CHECK_OUT", "EXCEPTION_REJECTED"):
+        row.status = "PENDING_APPROVAL"
+
+
 def row_view(row: Row) -> dict[str, Any]:
     return {
         "workDate": row.work_date.isoformat(),
@@ -342,6 +370,7 @@ def row_view(row: Row) -> dict[str, Any]:
         "attendanceId": row.attendance_id,
         "hasCheckInPhoto": row.has_check_in_photo,
         "hasCheckOutPhoto": row.has_check_out_photo,
+        "correction": row.correction,
         "delinquencies": [
             {
                 "code": d["code"],

@@ -103,6 +103,31 @@ def _pending_items(conn: Connection) -> list[dict[str, Any]]:
                 "roles": _APPROVER_ROLES,
             }
         )
+    # An attendance correction is an attendance request: it waits with the same people and counts
+    # for the same Monday deadline.
+    for r in conn.execute(
+        text(
+            """
+            SELECT c.correction_id, c.requested, c.work_date, c.created_at, e.security_user_id,
+                   e.full_name, e.employee_code
+            FROM hr.attendance_correction c JOIN hr.employee e ON e.employee_id = c.employee_id
+            WHERE c.status = 'PENDING'
+            """
+        )
+    ):
+        items.append(
+            {
+                "type": "ATTENDANCE",
+                "id": str(r[0]),
+                "detail": f"CORRECTION_{r[1]}",
+                "forDate": r[2].isoformat(),
+                "raisedAt": r[3],
+                "employeeUser": str(r[4]) if r[4] else None,
+                "employeeName": r[5],
+                "employeeCode": r[6],
+                "roles": _APPROVER_ROLES,
+            }
+        )
     for r in conn.execute(
         text(
             """
@@ -158,6 +183,9 @@ def _decision_times(conn: Connection, since: datetime) -> dict[str, list[float]]
     for who, raised, decided in conn.execute(
         text(
             "SELECT decided_by, created_at, decided_at FROM hr.attendance_exception"
+            " WHERE decided_at >= :s AND decided_by IS NOT NULL"
+            " UNION ALL"
+            " SELECT decided_by, created_at, decided_at FROM hr.attendance_correction"
             " WHERE decided_at >= :s AND decided_by IS NOT NULL"
             " UNION ALL"
             " SELECT decided_by, submitted_at, decided_at FROM hr.leave_request"

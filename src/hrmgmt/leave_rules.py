@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import Connection, text
 
 from hrmgmt import settings_store as cfg
+from hrmgmt.attendance_correction import VALUES, apply_to_units
 from hrmgmt.errors import ApiError
 from hrmgmt.timeutil import is_sunday
 
@@ -123,9 +124,22 @@ def attendance_units(
         ),
         {"e": employee_id, "a": after, "b": before},
     ).all()
-    if not rows:
+    # An approved attendance correction says what its day counts, with or without a check-in.
+    corrected = {
+        r[0]: VALUES[r[1]]
+        for r in conn.execute(
+            text(
+                "SELECT work_date, requested FROM hr.attendance_correction"
+                " WHERE employee_id = CAST(:e AS uuid) AND status = 'APPROVED'"
+                " AND (CAST(:a AS date) IS NULL OR work_date > :a) AND work_date < :b"
+            ),
+            {"e": employee_id, "a": after, "b": before},
+        )
+    }
+    if not rows and not corrected:
         return []
-    holidays = declared_holidays(conn, rows[0][0], rows[-1][0])
+    days = [r[0] for r in rows] + list(corrected)
+    holidays = declared_holidays(conn, min(days), max(days))
     out: list[tuple[date, Decimal | None]] = []
     for day, waiting, rejected in rows:
         if is_sunday(day) or day in holidays:
@@ -134,7 +148,7 @@ def attendance_units(
             out.append((day, None))
         else:
             out.append((day, Decimal("0.5") if rejected else Decimal(1)))
-    return out
+    return apply_to_units(out, corrected)
 
 
 def _last_block(conn: Connection, employee_id: str) -> Any:

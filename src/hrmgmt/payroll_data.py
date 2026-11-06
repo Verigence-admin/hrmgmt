@@ -12,6 +12,7 @@ from sqlalchemy import Connection, text
 
 from hrmgmt import attendance_grace as grace
 from hrmgmt import payroll_calc as pcalc
+from hrmgmt.attendance_correction import approved_values
 from hrmgmt.claim_rules import add_months
 from hrmgmt.timeutil import is_sunday
 
@@ -69,15 +70,20 @@ def leave_days_in_month(
 
 
 def present_days(conn: Connection, employee_id: str, month: date) -> Decimal:
-    return Decimal(
-        conn.execute(
+    """Days with a check-in, except where an approved attendance correction says what the day
+    counts (1 or 0.5); a corrected day with no check-in counts too."""
+    corrected = approved_values(conn, employee_id, month, month_end(month))
+    checked_in = {
+        r[0]
+        for r in conn.execute(
             text(
-                "SELECT count(*) FROM hr.attendance_day WHERE employee_id = CAST(:e AS uuid)"
+                "SELECT work_date FROM hr.attendance_day WHERE employee_id = CAST(:e AS uuid)"
                 " AND check_in_at IS NOT NULL AND work_date BETWEEN :a AND :b"
             ),
             {"e": employee_id, "a": month, "b": month_end(month)},
-        ).scalar_one()
-    )
+        )
+    }
+    return Decimal(len(checked_in - corrected.keys())) + sum(corrected.values(), Decimal(0))
 
 
 def structure_for(conn: Connection, employee_id: str, month: date) -> Any:
