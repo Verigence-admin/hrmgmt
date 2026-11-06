@@ -27,6 +27,7 @@ DELINQUENCY_LABELS = {
     "NO_FACE": "No face found in the photo",
     "FACE_MISMATCH": "Face does not match",
     "OFF_DAY_WORK": "Worked on an off day",
+    "SHORT_DAY": "Fewer than the minimum hours",
 }
 # These three belong to one punch, so they say which: "No face found in the check-out photo".
 _PER_PUNCH = {
