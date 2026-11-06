@@ -121,7 +121,10 @@ def build_rows(
     today: date,
     project_code: str | None = None,
     employee_id: str | None = None,
+    closed_today: bool = False,
 ) -> list[Row]:
+    """closed_today: it is past attendance.absent_after (17:00), so today's missing check-ins are
+    absences marked by the system, not "not checked in yet"."""
     window_start, _ = _bounds(first)
     _, window_end = _bounds(last)
     params: dict[str, Any] = {"a": first, "b": last, "e": employee_id}
@@ -175,6 +178,17 @@ def build_rows(
             params,
         ).mappings()
     ]
+    # Leave the Team Lead or Project Manager has not decided yet (product owner, 6 Nov 2026).
+    applied = [
+        (str(r["employee_id"]), r["from_date"], r["to_date"])
+        for r in conn.execute(
+            text(
+                "SELECT employee_id, from_date, to_date FROM hr.leave_request"
+                " WHERE status = 'PENDING' AND NOT half_day AND from_date <= :b AND to_date >= :a"
+            ),
+            params,
+        ).mappings()
+    ]
     corrections = live_by_day(conn, first, last)
     holidays = {
         r[0]
@@ -214,11 +228,24 @@ def build_rows(
             if non_working and record is None:
                 continue
             on_leave = any(e == eid and f <= day <= t for e, f, t in leave)
+            leave_applied = any(e == eid and f <= day <= t for e, f, t in applied)
+            closed = day < today or (day == today and closed_today)
             projects = _projects_on(assignments.get(str(emp["security_user_id"]), []), start, end)
             for project in projects:
                 if project_code and project["projectCode"] != project_code:
                     continue
-                row = _row(emp, eid, day, record, exceptions, on_leave, project, today=today)
+                row = _row(
+                    emp,
+                    eid,
+                    day,
+                    record,
+                    exceptions,
+                    on_leave,
+                    project,
+                    today=today,
+                    closed=closed,
+                    leave_applied=leave_applied,
+                )
                 _apply_correction(row, corrections.get((eid, day)))
                 rows.append(row)
         day += timedelta(days=1)
@@ -254,6 +281,8 @@ def _row(
     project: dict[str, Any],
     *,
     today: date,
+    closed: bool = False,
+    leave_applied: bool = False,
 ) -> Row:
     row = Row(
         work_date=day,
@@ -270,7 +299,10 @@ def _row(
     if record is None:
         if on_leave:
             row.status = "ON_LEAVE"
-        elif past:
+        elif leave_applied:
+            # Counted as absent in payroll until it is approved; shown for what it is.
+            row.status = "LEAVE_APPLIED"
+        elif past or closed:
             row.status = "ABSENT"
             row.delinquencies.append({"code": "ABSENT", "status": None})
         else:

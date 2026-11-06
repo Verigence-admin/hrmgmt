@@ -11,9 +11,11 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Connection, text
 
+from hrmgmt import settings_store as cfg
 from hrmgmt.api.attendance import day_kind, get_clock
 from hrmgmt.api.employees import _own_employee_id, _uuid
 from hrmgmt.approvals import decides_attendance
+from hrmgmt.attendance_calendar import closed_for_check_in
 from hrmgmt.attendance_grace import HALF_DAY_KINDS
 from hrmgmt.audit import record_audit
 from hrmgmt.authz import Authorizer
@@ -21,7 +23,7 @@ from hrmgmt.db import get_conn
 from hrmgmt.errors import ApiError, conflict, not_found
 from hrmgmt.principal import current_user, get_authorizer
 from hrmgmt.security import HumanPrincipal
-from hrmgmt.timeutil import Clock, ist_date
+from hrmgmt.timeutil import Clock, ist_date, to_ist
 
 router = APIRouter(prefix="/hr/v1", tags=["Attendance corrections"])
 
@@ -42,9 +44,12 @@ def _previous_month_start(today: date) -> date:
     return date(first.year - (first.month == 1), (first.month - 2) % 12 + 1, 1)
 
 
-def _check_day(conn: Connection, employee_id: str, day: date, today: date) -> None:
-    """Refuses a day that cannot be corrected, with a reason the employee can act on."""
-    if day >= today:
+def _check_day(
+    conn: Connection, employee_id: str, day: date, today: date, closed_today: bool = False
+) -> None:
+    """Refuses a day that cannot be corrected, with a reason the employee can act on. Today can be
+    corrected once it is past 17:00 and the system has marked it absent."""
+    if day > today or (day == today and not closed_today):
         raise _invalid("Only a past day can be corrected. Today, check in or check out instead.")
     if day < _previous_month_start(today):
         raise _invalid("Only days in this month or last month can be corrected.")
@@ -129,7 +134,14 @@ def raise_correction(
 ) -> dict[str, Any]:
     """An employee asks for a past working day to count as a full day or a half day."""
     employee_id = _own_employee_id(conn, user)
-    _check_day(conn, employee_id, body.work_date, ist_date(clock()))
+    now = clock()
+    _check_day(
+        conn,
+        employee_id,
+        body.work_date,
+        ist_date(now),
+        closed_for_check_in(to_ist(now).time(), cfg.load_all(conn)),
+    )
     live = conn.execute(
         text(
             "SELECT status FROM hr.attendance_correction WHERE employee_id = CAST(:e AS uuid)"
