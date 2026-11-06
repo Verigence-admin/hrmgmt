@@ -8,16 +8,27 @@ from datetime import date, datetime, timedelta
 from typing import Annotated, Any, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    Query,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Connection, text
 
 from hrmgmt import permissions as perm
 from hrmgmt import settings_store as cfg
+from hrmgmt import short_day
 from hrmgmt import workcontext as wc
 from hrmgmt.api.employees import _own_employee_id
 from hrmgmt.approvals import decides_attendance
+from hrmgmt.attendance_calendar import closed_for_check_in
 from hrmgmt.attendance_grace import LATE_EARLY, grace_view
 from hrmgmt.audit import record_audit
 from hrmgmt.authz import Authorizer
@@ -188,6 +199,7 @@ def _reason_prompt(
     outlet: dict[str, Any] | None,
     values: dict[str, Any],
     event: str,
+    worked: timedelta | None = None,
 ) -> str:
     parts = []
     if "OUT_OF_FENCE" in kinds and distance is not None:
@@ -200,6 +212,11 @@ def _reason_prompt(
         parts.append(f"You are checking in after {values['attendance.late_after']}.")
     if "EARLY_CHECK_OUT" in kinds:
         parts.append(f"You are checking out before {values['attendance.check_out_earliest']}.")
+    if short_day.KIND in kinds and worked is not None:
+        parts.append(
+            f"You have been checked in for {short_day.duration_text(worked)} today; the minimum is"
+            f" {int(values['attendance.min_work_hours'])} hours."
+        )
     side = "check-in" if event == "CHECK_IN" else "check-out"
     parts.append(f"Say why; your Team Lead will review this {side}.")
     return " ".join(parts)
@@ -222,6 +239,7 @@ def _record_event(
     geocoder: ReverseGeocoder | None,
     conn: Connection,
     data: bytes,
+    background: BackgroundTasks | None = None,
 ) -> dict[str, Any]:
     if storage is None:
         raise dependency_unavailable("Photo storage is not configured.")
@@ -263,6 +281,20 @@ def _record_event(
     )
     if event == "CHECK_IN" and day is not None and day["check_in_at"] is not None:
         raise conflict("ATTENDANCE_ALREADY_CHECKED_IN", "You have already checked in today.")
+    if (
+        event == "CHECK_IN"
+        and not off_day
+        and closed_for_check_in(to_ist(now).time(), values)
+        and (day is None or day["check_in_at"] is None)
+    ):
+        # Product owner (6 Nov 2026): no check-in by 17:00 on a working day and the system marks
+        # the day Absent. If the person was at work, they raise an attendance correction.
+        raise ApiError(
+            422,
+            "ATTENDANCE_DAY_CLOSED",
+            f"It is past {values['attendance.absent_after']}, so today has been marked Absent by"
+            " the system. If you were at work, raise an attendance correction for today.",
+        )
     if event == "CHECK_OUT":
         if day is None or day["check_in_at"] is None:
             raise conflict("ATTENDANCE_NOT_CHECKED_IN", "Check in first.")
@@ -295,7 +327,19 @@ def _record_event(
         if event == "CHECK_IN":
             kinds.append("OFF_DAY_WORK")
             flags.append("OFF_DAY")
-    needs_reason = [k for k in kinds if k in ("OUT_OF_FENCE", "LATE_CHECK_IN", "EARLY_CHECK_OUT")]
+    # Product owner (6 Nov 2026): less than the minimum hours between check-in and check-out on a
+    # working day goes to the Team Lead, and the Project Managers are told.
+    worked: timedelta | None = None
+    if event == "CHECK_OUT" and not off_day and day is not None:
+        worked = now - day["check_in_at"]
+        if short_day.is_short(conn, employee_id, work_date, worked, values):
+            kinds.append(short_day.KIND)
+            flags.append(short_day.KIND)
+    needs_reason = [
+        k
+        for k in kinds
+        if k in ("OUT_OF_FENCE", "LATE_CHECK_IN", "EARLY_CHECK_OUT", short_day.KIND)
+    ]
     if needs_reason and not (reason and reason.strip()):
         # The token is not used up: the person adds a reason and sends the same photo again.
         # Product owner (4 Nov 2026): a late check-in or early check-out needs a reason too, and the
@@ -303,7 +347,7 @@ def _record_event(
         raise ApiError(
             422,
             "ATTENDANCE_REASON_REQUIRED",
-            _reason_prompt(needs_reason, distance, outlet, values, event),
+            _reason_prompt(needs_reason, distance, outlet, values, event, worked),
         )
 
     # The token: one use, for this person and this event, still within its window.
@@ -465,6 +509,25 @@ def _record_event(
                 "r": (reason or "").strip() or None,
             },
         )
+    if short_day.KIND in kinds and background is not None and day is not None:
+        notice = short_day.build_notice(
+            conn,
+            employee_id=employee_id,
+            work_date=work_date,
+            check_in_at=day["check_in_at"],
+            check_out_at=now,
+            reason=reason,
+            pm_user_ids=wc.project_approvers(conn, employee_id, now, ("PM",)),
+            values=values,
+        )
+        if notice is not None:
+            # Sent after the answer goes back, so the mail server never slows the check-out.
+            background.add_task(
+                short_day.notify_project_managers,
+                notice,
+                provisioner=getattr(request.app.state, "provisioner", None),
+                mailer=getattr(request.app.state, "mailer", None),
+            )
     record_audit(
         conn,
         actor_user_id=user.user_id,
@@ -550,6 +613,7 @@ async def check_in(
 @router.post("/attendance/check-out")
 async def check_out(
     request: Request,
+    background: BackgroundTasks,
     photo: UploadFile = File(...),
     token: str = Form(..., max_length=100),
     latitude: float = Form(...),
@@ -579,6 +643,7 @@ async def check_out(
         geocoder=geocoder,
         conn=conn,
         data=await _read(photo),
+        background=background,
     )
 
 
@@ -793,7 +858,9 @@ def team_attendance(
 ) -> dict[str, Any]:
     """HR and the CEO: the month at a glance. The month's working days and holidays, and for every
     active employee the days present, on leave and absent, work on a day off, and what waits for approval."""
-    today = ist_date(clock())
+    now = clock()
+    today = ist_date(now)
+    closed_today = closed_for_check_in(to_ist(now).time(), cfg.load_all(conn))
     first, nxt = _month_bounds(month, today)
     holidays = {
         r[0]: str(r[1])
@@ -836,7 +903,11 @@ def team_attendance(
         here = present.get(eid, set())
         mine = leave.get(eid, {})
         joined = r["date_of_joining"]
-        counted = [d for d in working if d < today and (joined is None or d >= joined)]
+        counted = [
+            d
+            for d in working
+            if (d < today or (d == today and closed_today)) and (joined is None or d >= joined)
+        ]
         absent = sum(1 - mine.get(d, 0.0) for d in counted if d not in here)
         employees.append(
             {

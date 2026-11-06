@@ -187,6 +187,9 @@ def _purge(conn: Connection, scope: Scope) -> list[str]:
         conn.execute(
             text("DELETE FROM hr.attendance_exception WHERE work_date BETWEEN :a AND :b"), p
         )
+        conn.execute(
+            text("DELETE FROM hr.attendance_correction WHERE work_date BETWEEN :a AND :b"), p
+        )
         conn.execute(text("DELETE FROM hr.attendance_day WHERE work_date BETWEEN :a AND :b"), p)
         return keys
     if scope.kind == "LEAVE":
@@ -378,6 +381,7 @@ def _delete_employee(conn: Connection, eid: str, has_photo: bool) -> list[str]:
     ):
         keys += [k for k in pair if k]
     conn.execute(text(f"DELETE FROM hr.attendance_exception WHERE {where}"), p)
+    conn.execute(text(f"DELETE FROM hr.attendance_correction WHERE {where}"), p)
     conn.execute(text(f"DELETE FROM hr.attendance_day WHERE {where}"), p)
     conn.execute(text(f"DELETE FROM hr.capture_token WHERE {where}"), p)
 

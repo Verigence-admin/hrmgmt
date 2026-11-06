@@ -7,7 +7,8 @@ how much of the month's grace is used. Payroll shows how many went beyond grace;
 for them yet.
 
 A rejected late, early or out-of-fence exception makes the day a half day (product owner,
-4 Nov 2026), in attendance and in payroll."""
+4 Nov 2026), in attendance and in payroll. So does a rejected short day (less than the minimum
+hours, 6 Nov 2026); earned leave already counts any rejected working-day exception as half."""
 
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from sqlalchemy import Connection, text
 from hrmgmt import settings_store as cfg
 
 LATE_EARLY = ("LATE_CHECK_IN", "EARLY_CHECK_OUT")
-HALF_DAY_KINDS = ("LATE_CHECK_IN", "EARLY_CHECK_OUT", "OUT_OF_FENCE")
+HALF_DAY_KINDS = ("LATE_CHECK_IN", "EARLY_CHECK_OUT", "OUT_OF_FENCE", "SHORT_DAY")
 
 
 def month_bounds(day: date) -> tuple[date, date]:
@@ -66,13 +67,17 @@ def beyond_grace(conn: Connection, employee_id: str, month: date) -> int:
 
 
 def half_days(conn: Connection, employee_id: str, month: date) -> Decimal:
-    """0.5 for every day of the month with a rejected late, early or out-of-fence exception."""
+    """0.5 for every day of the month with a rejected late, early, out-of-fence or short-day
+    exception, unless an approved attendance correction says what that day counts."""
     start, end = month_bounds(month)
     count = conn.execute(
         text(
-            "SELECT count(DISTINCT work_date) FROM hr.attendance_exception"
-            " WHERE employee_id = CAST(:e AS uuid) AND status = 'REJECTED' AND kind = ANY(:k)"
-            " AND work_date >= :a AND work_date < :b"
+            "SELECT count(DISTINCT x.work_date) FROM hr.attendance_exception x"
+            " WHERE x.employee_id = CAST(:e AS uuid) AND x.status = 'REJECTED' AND x.kind = ANY(:k)"
+            " AND x.work_date >= :a AND x.work_date < :b"
+            " AND NOT EXISTS (SELECT 1 FROM hr.attendance_correction c"
+            "   WHERE c.employee_id = x.employee_id AND c.work_date = x.work_date"
+            "   AND c.status = 'APPROVED')"
         ),
         {"e": employee_id, "k": list(HALF_DAY_KINDS), "a": start, "b": end},
     ).scalar_one()

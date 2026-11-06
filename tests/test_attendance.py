@@ -669,7 +669,7 @@ def test_grace_is_shown_to_the_team_lead_and_counted_together_for_late_and_early
     world.assign(tl, "TL")
     world.clock.set(ist(2026, 10, 5, 11, 30))
     send(world, pc, "in", token(world, pc), reason="Bus late")
-    world.clock.set(ist(2026, 10, 5, 16, 0))
+    world.clock.set(ist(2026, 10, 5, 16, 45))  # early, but not under the minimum hours
     send(world, pc, "out", token(world, pc, "CHECK_OUT"), reason="Family")
     items = world.client.get("/hr/v1/approvals/attendance", headers=world.headers(tl)).json()[
         "items"

@@ -33,12 +33,26 @@ SPECS: dict[str, Spec] = {
     "attendance.check_out_standard": Spec(
         "time", "18:30", label="Standard check-out time", group="Attendance"
     ),
+    "attendance.absent_after": Spec(
+        "time",
+        "17:00",
+        label="No check-in by this time: the system marks the day Absent",
+        group="Attendance",
+    ),
     "attendance.grace_per_month": Spec(
         "int",
         1,
         0,
         10,
         "Late check-ins and early check-outs together allowed per month before they count in payroll",
+        "Attendance",
+    ),
+    "attendance.min_work_hours": Spec(
+        "int",
+        5,
+        1,
+        12,
+        "Least hours between check-in and check-out; a shorter day goes to the Team Lead and the Project Manager is told",
         "Attendance",
     ),
     "attendance.geofence_radius_m": Spec(
