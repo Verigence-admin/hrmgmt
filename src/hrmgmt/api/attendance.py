@@ -28,6 +28,7 @@ from hrmgmt import short_day
 from hrmgmt import workcontext as wc
 from hrmgmt.api.employees import _own_employee_id
 from hrmgmt.approvals import decides_attendance
+from hrmgmt.attendance_calendar import closed_for_check_in
 from hrmgmt.attendance_grace import LATE_EARLY, grace_view
 from hrmgmt.audit import record_audit
 from hrmgmt.authz import Authorizer
@@ -279,6 +280,20 @@ def _record_event(
     )
     if event == "CHECK_IN" and day is not None and day["check_in_at"] is not None:
         raise conflict("ATTENDANCE_ALREADY_CHECKED_IN", "You have already checked in today.")
+    if (
+        event == "CHECK_IN"
+        and not off_day
+        and closed_for_check_in(to_ist(now).time(), values)
+        and (day is None or day["check_in_at"] is None)
+    ):
+        # Product owner (6 Nov 2026): no check-in by 17:00 on a working day and the system marks
+        # the day Absent. If the person was at work, they raise an attendance correction.
+        raise ApiError(
+            422,
+            "ATTENDANCE_DAY_CLOSED",
+            f"It is past {values['attendance.absent_after']}, so today has been marked Absent by"
+            " the system. If you were at work, raise an attendance correction for today.",
+        )
     if event == "CHECK_OUT":
         if day is None or day["check_in_at"] is None:
             raise conflict("ATTENDANCE_NOT_CHECKED_IN", "Check in first.")
@@ -842,7 +857,9 @@ def team_attendance(
 ) -> dict[str, Any]:
     """HR and the CEO: the month at a glance. The month's working days and holidays, and for every
     active employee the days present, on leave and absent, work on a day off, and what waits for approval."""
-    today = ist_date(clock())
+    now = clock()
+    today = ist_date(now)
+    closed_today = closed_for_check_in(to_ist(now).time(), cfg.load_all(conn))
     first, nxt = _month_bounds(month, today)
     holidays = {
         r[0]: str(r[1])
@@ -885,7 +902,11 @@ def team_attendance(
         here = present.get(eid, set())
         mine = leave.get(eid, {})
         joined = r["date_of_joining"]
-        counted = [d for d in working if d < today and (joined is None or d >= joined)]
+        counted = [
+            d
+            for d in working
+            if (d < today or (d == today and closed_today)) and (joined is None or d >= joined)
+        ]
         absent = sum(1 - mine.get(d, 0.0) for d in counted if d not in here)
         employees.append(
             {

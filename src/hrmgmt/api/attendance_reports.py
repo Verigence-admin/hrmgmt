@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Annotated, Any
 
 import structlog
@@ -13,13 +13,17 @@ from openpyxl.styles import Font
 from sqlalchemy import Connection, text
 
 from hrmgmt import permissions as perm
+from hrmgmt import settings_store as cfg
 from hrmgmt import workcontext as wc
 from hrmgmt.api.attendance import day_kind, get_clock
+from hrmgmt.approvals import is_ceo
+from hrmgmt.attendance_calendar import cells, closed_for_check_in, week_minutes, week_start
 from hrmgmt.attendance_report import MAX_RANGE_DAYS, Row, build_rows, delinquency_label, row_view
 from hrmgmt.audit import record_audit
+from hrmgmt.authz import Authorizer
 from hrmgmt.db import get_conn
-from hrmgmt.errors import ApiError
-from hrmgmt.principal import require_permission
+from hrmgmt.errors import ApiError, forbidden
+from hrmgmt.principal import current_user, get_authorizer, has_permission, require_permission
 from hrmgmt.security import HumanPrincipal
 from hrmgmt.timeutil import Clock, ist_date, to_ist
 
@@ -28,6 +32,11 @@ router = APIRouter(prefix="/hr/v1", tags=["Attendance reports"])
 
 can_read_attendance = require_permission(perm.HR_ATTENDANCE_READ_ALL)
 can_read_employees = require_permission(perm.HR_EMPLOYEE_READ)
+
+
+def _closed(conn: Connection, now: datetime) -> bool:
+    """Past 17:00 (attendance.absent_after): today's missing check-ins are system absences."""
+    return closed_for_check_in(to_ist(now).time(), cfg.load_all(conn))
 
 
 def _day(value: str | None, default: date, name: str) -> date:
@@ -49,11 +58,14 @@ def daily_attendance(
 ) -> dict[str, Any]:
     """HR and the CEO: every active employee's check-in and check-out on one day, project by
     project, with whatever needs attention."""
-    today = ist_date(clock())
+    now = clock()
+    today = ist_date(now)
     day = _day(on, today, "Date")
     if day > today:
         raise ApiError(422, "HR_VALIDATION_FAILED", "A future day has no attendance yet.")
-    rows = build_rows(conn, day, day, today=today, project_code=project_code)
+    rows = build_rows(
+        conn, day, day, today=today, project_code=project_code, closed_today=_closed(conn, now)
+    )
     kind, holiday_name = day_kind(conn, day)
     people: dict[str, Row] = {}
     for r in rows:
@@ -84,6 +96,7 @@ def daily_attendance(
             "absent": counts.count("ABSENT"),
             "onLeave": counts.count("ON_LEAVE"),
             "pendingApproval": counts.count("PENDING_APPROVAL"),
+            "corrected": counts.count("CORRECTED"),
             "withDelinquencies": sum(1 for r in people.values() if r.delinquencies),
         },
         "rows": [row_view(r) for r in rows],
@@ -136,7 +149,14 @@ def attendance_report(
         raise ApiError(
             422, "HR_VALIDATION_FAILED", f"Choose at most {MAX_RANGE_DAYS} days for one report."
         )
-    rows = build_rows(conn, first, last, today=today, project_code=project_code)
+    rows = build_rows(
+        conn,
+        first,
+        last,
+        today=today,
+        project_code=project_code,
+        closed_today=_closed(conn, clock()),
+    )
 
     book = Workbook()
     sheet = book.active
@@ -384,4 +404,151 @@ def project_history(
             }
             for line in items
         ],
+    }
+
+
+# ---- the team's day, for Team Leads, Project Managers and Executives ------------------------
+
+
+def _shared_projects(rows: list[Row]) -> dict[str, list[dict[str, Any]]]:
+    """employee -> the projects they are on that day, when more than one: a shared employee."""
+    seen: dict[str, dict[str | None, str | None]] = defaultdict(dict)
+    for r in rows:
+        if r.project_code:
+            seen[r.employee_id][r.project_code] = r.project_name
+    return {
+        eid: [
+            {"projectCode": c, "projectName": n}
+            for c, n in sorted(p.items(), key=lambda x: str(x[1] or x[0]))
+        ]
+        for eid, p in seen.items()
+        if len(p) > 1
+    }
+
+
+_LEAD_ROLES = ("TL", "PM", "EXECUTIVE")
+# How closely a face matched is for HR to judge; the team view keeps the flag, not the score.
+_HR_ONLY = ("checkInFaceScore", "checkInFaceRef", "checkOutFaceScore", "checkOutFaceRef")
+
+
+def _lead_projects(
+    conn: Connection, authorizer: Authorizer, user: HumanPrincipal, at: datetime
+) -> dict[str, str | None] | None:
+    """Project code -> name for the projects this person leads (TL, PM or Executive) today.
+    None means every project (HR and the CEO)."""
+    if is_ceo(authorizer, user.user_id) or has_permission(
+        authorizer, user, perm.HR_ATTENDANCE_READ_ALL
+    ):
+        return None
+    projects = {
+        str(r[0]): r[1]
+        for r in conn.execute(
+            text(
+                "SELECT DISTINCT project_code, project_name FROM hr.work_assignment"
+                " WHERE security_user_id = CAST(:u AS uuid) AND role_code = ANY(:r)"
+                " AND project_code IS NOT NULL"
+                " AND valid_from <= :n AND (valid_to IS NULL OR valid_to > :n)"
+            ),
+            {"u": user.user_id, "r": list(_LEAD_ROLES), "n": at},
+        )
+    }
+    if not projects:
+        raise forbidden("Only a Team Lead, Project Manager, Executive, HR or the CEO can see this.")
+    return projects
+
+
+def _summary(rows: list[Row]) -> dict[str, int]:
+    people: dict[str, Row] = {}
+    for r in rows:
+        people.setdefault(r.employee_id, r)
+    statuses = [r.status for r in people.values()]
+    return {
+        "employees": len(people),
+        "checkedIn": sum(1 for r in people.values() if r.check_in_at),
+        "completed": statuses.count("COMPLETE"),
+        "stillIn": statuses.count("CHECKED_IN"),
+        "notCheckedIn": statuses.count("NOT_CHECKED_IN"),
+        "absent": statuses.count("ABSENT"),
+        "onLeave": statuses.count("ON_LEAVE"),
+        "missingCheckOut": statuses.count("MISSING_CHECK_OUT"),
+        "pendingApproval": statuses.count("PENDING_APPROVAL"),
+        "rejected": statuses.count("EXCEPTION_REJECTED"),
+        "corrected": statuses.count("CORRECTED"),
+        "leaveApplied": statuses.count("LEAVE_APPLIED"),
+        "late": sum(
+            1 for r in people.values() if any(d["code"] == "LATE_CHECK_IN" for d in r.delinquencies)
+        ),
+        "shortDay": sum(
+            1 for r in people.values() if any(d["code"] == "SHORT_DAY" for d in r.delinquencies)
+        ),
+    }
+
+
+@router.get("/attendance/team-daily")
+def team_daily_attendance(
+    on: Annotated[str | None, Query(alias="date", max_length=10)] = None,
+    project_code: Annotated[str | None, Query(alias="projectCode", max_length=60)] = None,
+    user: HumanPrincipal = Depends(current_user),
+    authorizer: Authorizer = Depends(get_authorizer),
+    clock: Clock = Depends(get_clock),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """A Team Lead, Project Manager or Executive: one day's attendance of the people on their
+    projects, summed up for all of them and project by project, with each person's row. HR and the
+    CEO see every project. Face-match scores stay in HR's own view."""
+    now = clock()
+    today = ist_date(now)
+    day = _day(on, today, "Date")
+    if day > today:
+        raise ApiError(422, "HR_VALIDATION_FAILED", "A future day has no attendance yet.")
+    projects = _lead_projects(conn, authorizer, user, now)
+    if project_code and projects is not None and project_code not in projects:
+        raise forbidden("You do not lead that project.")
+    all_rows = build_rows(conn, day, day, today=today, closed_today=_closed(conn, now))
+    rows = [
+        r
+        for r in all_rows
+        if (projects is None or r.project_code in projects)
+        and (not project_code or r.project_code == project_code)
+    ]
+    by_project: dict[tuple[str | None, str | None], list[Row]] = defaultdict(list)
+    for r in rows:
+        by_project[(r.project_code, r.project_name)].append(r)
+    kind, holiday_name = day_kind(conn, day)
+    shared = _shared_projects(all_rows)
+    week = week_start(day)
+    by_person = cells(
+        conn,
+        sorted({r.employee_id for r in rows}),
+        week,
+        week + timedelta(days=6),
+        now=now,
+        values=cfg.load_all(conn),
+    )
+    views = []
+    for r in rows:
+        view = row_view(r)
+        for key in _HR_ONLY:
+            view.pop(key, None)
+        mine = by_person.get(r.employee_id, {})
+        cell = mine.get(day)
+        view["workedMinutes"] = cell.minutes if cell else 0
+        view["runningMinutes"] = cell.running_minutes if cell else None
+        view["weekMinutes"] = week_minutes(mine, week)
+        view["leave"] = cell.leave if cell else None
+        view["otherProjects"] = [
+            p for p in shared.get(r.employee_id, []) if p["projectCode"] != r.project_code
+        ]
+        view["shared"] = bool(view["otherProjects"])
+        views.append(view)
+    return {
+        "date": day.isoformat(),
+        "dayKind": kind,
+        "holiday": holiday_name,
+        "summary": _summary(rows),
+        "projects": [
+            {"projectCode": code, "projectName": name, "summary": _summary(items)}
+            for (code, name), items in sorted(by_project.items(), key=lambda p: str(p[0][1] or ""))
+        ],
+        "rows": views,
     }
