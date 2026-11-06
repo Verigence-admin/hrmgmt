@@ -19,6 +19,7 @@ from hrmgmt.provisioning import (
     SyncOutcome,
 )
 from hrmgmt.storage import StorageError
+from tests.support import assert_night_guarded
 from tests.test_api import FakeAuthorizer, FakeValidator
 
 HR = str(uuid.uuid4())
@@ -1250,6 +1251,9 @@ def test_an_employee_raises_a_ticket_with_files_and_support_reads_it(make_client
     assert got.headers["x-content-type-options"] == "nosniff"
     mine = client.get(f"/hr/v1/tickets/{tid}/files/{html['fileId']}", headers=auth(me))
     assert mine.status_code == 200
+    assert_night_guarded(
+        client, client.app, f"/hr/v1/tickets/{tid}/files/{html['fileId']}", auth(me)
+    )
 
 
 def test_the_conversation_goes_both_ways_and_a_reply_reopens_a_closed_ticket(

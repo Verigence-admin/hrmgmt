@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from hrmgmt import permissions as perm
 from hrmgmt.geo import haversine_m
-from tests.support import FAR, NEAR, OUTLET, World, ist, jpeg
+from tests.support import FAR, NEAR, OUTLET, World, assert_night_guarded, ist, jpeg
 
 
 @pytest.fixture()
@@ -500,6 +500,7 @@ def test_photos_are_visible_to_the_owner_the_approver_and_hr_only_and_views_are_
             {"e": pc["employeeId"]},
         ).scalar_one()
     assert views == 1  # the owner's own view is not logged; the TL's is
+    assert_night_guarded(world.client, world.app, path, world.headers(pc_user))
 
 
 # ---- settings, holidays -------------------------------------------------------------------

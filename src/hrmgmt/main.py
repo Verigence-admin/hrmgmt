@@ -37,6 +37,7 @@ from hrmgmt.db import get_engine
 from hrmgmt.errors import install_error_handlers
 from hrmgmt.geocode import GoogleReverseGeocoder
 from hrmgmt.mailer import SmtpMailer
+from hrmgmt.night_control import NightGate, SecurityNightControl
 from hrmgmt.provisioning import SecurityUserProvisioner
 from hrmgmt.security import SecurityTokenValidator
 from hrmgmt.storage import S3Storage
@@ -68,6 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.workcontext = None
     app.state.clock = None
     app.state.mailer = None
+    app.state.night_gate = None
     if settings.security_jwks_url and settings.security_issuer and settings.security_audience:
         app.state.validator = SecurityTokenValidator(
             jwks_url=settings.security_jwks_url,
@@ -85,6 +87,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.authorizer = authorizer
         app.state.provisioner = SecurityUserProvisioner(
             base_url=settings.security_base_url, token_provider=authorizer.service_token
+        )
+        # Night control (product owner, 6 Nov 2026): Security decides, myHR enforces on downloads.
+        app.state.night_gate = NightGate(
+            SecurityNightControl(
+                base_url=settings.security_base_url, token_provider=authorizer.service_token
+            )
         )
     else:
         logger.warning("hr_permission_checks_not_configured")

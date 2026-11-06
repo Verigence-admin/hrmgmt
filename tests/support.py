@@ -14,6 +14,7 @@ from sqlalchemy import text
 from hrmgmt import permissions as perm
 from hrmgmt.config import Settings
 from hrmgmt.main import create_app
+from hrmgmt.night_control import NightDecision, NightGate
 from hrmgmt.provisioning import (
     ContactChanged,
     CreatedLogin,
@@ -112,6 +113,51 @@ class FakeProvisioner:
         if getattr(self, "set_password_error", None):
             raise ProvisioningError(self.set_password_error, "x")
         return f"login-{user_id[:8]}@example.com"
+
+
+class FakeNightControl:
+    """Stands in for Security's night-control check. `blocked` is the answer; `error` makes the
+    check fail as if Security were down. Every question asked is kept in `calls`."""
+
+    def __init__(self, blocked: bool = False, error: Exception | None = None):
+        self.blocked = blocked
+        self.error = error
+        self.calls: list[tuple[str, str]] = []
+
+    def check(self, *, user_id, feature_key):
+        self.calls.append((user_id, feature_key))
+        if self.error is not None:
+            raise self.error
+        if self.blocked:
+            return NightDecision(True, "NIGHT_MODE", "Night Mode On")
+        return NightDecision(False)
+
+
+NIGHT_MODE_BODY = {"code": "NIGHT_MODE", "detail": "Night Mode On"}
+
+
+def install_night(app, control: FakeNightControl | None = None) -> FakeNightControl:
+    """Puts night control on an app, with no reuse so a test can flip the answer at once."""
+    control = control or FakeNightControl()
+    app.state.night_gate = NightGate(control, reuse_seconds=0)
+    return control
+
+
+def assert_night_guarded(client, app, path: str, headers: dict[str, str], **kw) -> None:
+    """The file at `path` is refused with NIGHT_MODE while Security says blocked, and served (200)
+    when Security allows or cannot answer. Leaves the app without night control afterwards."""
+    night = install_night(app, FakeNightControl(blocked=True))
+    try:
+        refused = client.get(path, headers=headers, **kw)
+        assert refused.status_code == 403, refused.text
+        assert refused.json() == NIGHT_MODE_BODY
+        assert night.calls and night.calls[-1][1] == "FILE_DOWNLOAD"
+        night.blocked = False
+        assert client.get(path, headers=headers, **kw).status_code == 200
+        night.error = RuntimeError("Security is down")
+        assert client.get(path, headers=headers, **kw).status_code == 200
+    finally:
+        app.state.night_gate = None
 
 
 class FakeGeocoder:

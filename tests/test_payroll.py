@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import text
 
 from hrmgmt import permissions as perm
-from tests.support import OUTLET, World, ist, jpeg
+from tests.support import OUTLET, World, assert_night_guarded, ist, jpeg
 
 MONTH = "2026-10"
 UNCONFIRMED_STATUTORY = {
@@ -510,6 +510,8 @@ def test_payslips_are_made_on_approval_claims_follow_and_pdfs_are_private(team, 
             {"u": team.hr},
         ).scalar_one()
     assert viewed == 1
+    pdf_path = f"/hr/v1/payslips/{mine[0]['payslipId']}/pdf"
+    assert_night_guarded(world.client, world.app, pdf_path, world.headers(user))
     listed = team.call("get", f"/payroll/runs/{rid}/payslips", team.hr).json()["items"]
     assert {p["employeeId"] for p in listed} >= {eid, other_eid}
 

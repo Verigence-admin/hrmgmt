@@ -23,6 +23,7 @@ from hrmgmt.audit import record_audit
 from hrmgmt.authz import Authorizer
 from hrmgmt.db import get_conn
 from hrmgmt.errors import ApiError, conflict, dependency_unavailable, forbidden, not_found
+from hrmgmt.night_control import night_file_download
 from hrmgmt.payslip_pdf import render_payslip
 from hrmgmt.principal import current_user, get_authorizer, has_permission, require_permission
 from hrmgmt.security import HumanPrincipal
@@ -1321,7 +1322,7 @@ def run_payslips(
     }
 
 
-@router.get("/payslips/{payslip_id}/pdf")
+@router.get("/payslips/{payslip_id}/pdf", dependencies=[Depends(night_file_download)])
 def payslip_pdf(
     payslip_id: str,
     request: Request,

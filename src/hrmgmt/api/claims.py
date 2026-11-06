@@ -21,6 +21,7 @@ from hrmgmt.audit import record_audit
 from hrmgmt.authz import Authorizer
 from hrmgmt.db import get_conn
 from hrmgmt.errors import ApiError, conflict, dependency_unavailable, not_found
+from hrmgmt.night_control import night_file_download
 from hrmgmt.principal import current_user, get_authorizer, has_permission
 from hrmgmt.receipts import (
     MAX_RECEIPT_BYTES,
@@ -702,7 +703,7 @@ def claim_detail(
     return out
 
 
-@router.get("/claims/{claim_id}/receipts/{receipt_id}")
+@router.get("/claims/{claim_id}/receipts/{receipt_id}", dependencies=[Depends(night_file_download)])
 def receipt_file(
     claim_id: str,
     receipt_id: str,
