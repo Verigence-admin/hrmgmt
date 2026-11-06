@@ -7,7 +7,8 @@ how much of the month's grace is used. Payroll shows how many went beyond grace;
 for them yet.
 
 A rejected late, early or out-of-fence exception makes the day a half day (product owner,
-4 Nov 2026), in attendance and in payroll."""
+4 Nov 2026), in attendance and in payroll. So does a rejected short day (less than the minimum
+hours, 6 Nov 2026); earned leave already counts any rejected working-day exception as half."""
 
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from sqlalchemy import Connection, text
 from hrmgmt import settings_store as cfg
 
 LATE_EARLY = ("LATE_CHECK_IN", "EARLY_CHECK_OUT")
-HALF_DAY_KINDS = ("LATE_CHECK_IN", "EARLY_CHECK_OUT", "OUT_OF_FENCE")
+HALF_DAY_KINDS = ("LATE_CHECK_IN", "EARLY_CHECK_OUT", "OUT_OF_FENCE", "SHORT_DAY")
 
 
 def month_bounds(day: date) -> tuple[date, date]:
@@ -66,7 +67,8 @@ def beyond_grace(conn: Connection, employee_id: str, month: date) -> int:
 
 
 def half_days(conn: Connection, employee_id: str, month: date) -> Decimal:
-    """0.5 for every day of the month with a rejected late, early or out-of-fence exception."""
+    """0.5 for every day of the month with a rejected late, early, out-of-fence or short-day
+    exception."""
     start, end = month_bounds(month)
     count = conn.execute(
         text(

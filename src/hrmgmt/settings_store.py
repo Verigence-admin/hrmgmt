@@ -41,6 +41,14 @@ SPECS: dict[str, Spec] = {
         "Late check-ins and early check-outs together allowed per month before they count in payroll",
         "Attendance",
     ),
+    "attendance.min_work_hours": Spec(
+        "int",
+        5,
+        1,
+        12,
+        "Least hours between check-in and check-out; a shorter day goes to the Team Lead and the Project Manager is told",
+        "Attendance",
+    ),
     "attendance.geofence_radius_m": Spec(
         "int", 500, 50, 5000, "Geofence radius for PCs (metres)", "Attendance"
     ),
