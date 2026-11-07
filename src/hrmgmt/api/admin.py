@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import date
-from typing import Annotated, Any, Literal
+from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Connection, text
 
@@ -13,8 +12,8 @@ from hrmgmt import settings_store as cfg
 from hrmgmt import workcontext as wc
 from hrmgmt.audit import record_audit
 from hrmgmt.db import get_conn, get_engine
-from hrmgmt.errors import ApiError, conflict, dependency_unavailable, not_found
-from hrmgmt.principal import current_user, require_permission
+from hrmgmt.errors import ApiError, conflict, dependency_unavailable
+from hrmgmt.principal import require_permission
 from hrmgmt.security import HumanPrincipal
 
 router = APIRouter(prefix="/hr/v1", tags=["Settings"])
@@ -72,6 +71,17 @@ def update_settings(
             "HR_SETTING_INVALID",
             "Earliest check-out must not be after the standard check-out.",
         )
+    if not (
+        merged["attendance.late_after"]
+        < merged["attendance.half_day_split"]
+        < merged["attendance.check_out_earliest"]
+    ):
+        raise ApiError(
+            422,
+            "HR_SETTING_INVALID",
+            "The half-day split must be after the late check-in time and before the earliest"
+            " check-out.",
+        )
     if merged["claims.finance_threshold"] > merged["claims.travel_monthly_limit"]:
         raise ApiError(
             422,
@@ -101,93 +111,6 @@ def update_settings(
             request=request,
         )
     return list_settings(user, conn)
-
-
-# ---- holidays ------------------------------------------------------------------------------
-
-
-@router.get("/holidays")
-def list_holidays(
-    year: Annotated[int | None, Query(ge=2020, le=2100)] = None,
-    _: HumanPrincipal = Depends(current_user),
-    conn: Connection = Depends(get_conn),
-) -> dict[str, Any]:
-    """Visible to every signed-in person. A TENTATIVE date is only a proposal: final holidays are
-    declared by HR, and only declared ones count as non-working days."""
-    rows = conn.execute(
-        text(
-            "SELECT holiday_date, name, status FROM hr.holiday"
-            " WHERE (CAST(:y AS int) IS NULL OR extract(year FROM holiday_date) = :y)"
-            " ORDER BY holiday_date"
-        ),
-        {"y": year},
-    ).mappings()
-    return {
-        "items": [
-            {"date": r["holiday_date"].isoformat(), "name": r["name"], "status": r["status"]}
-            for r in rows
-        ],
-        "note": "Tentative dates are not final. Final holidays are declared by HR.",
-    }
-
-
-class HolidayIn(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    name: str = Field(min_length=2, max_length=120)
-    status: Literal["TENTATIVE", "DECLARED"] = "TENTATIVE"
-
-
-@router.put("/holidays/{holiday_date}")
-def put_holiday(
-    holiday_date: date,
-    body: HolidayIn,
-    request: Request,
-    user: HumanPrincipal = Depends(can_manage_settings),
-    conn: Connection = Depends(get_conn),
-) -> dict[str, Any]:
-    conn.execute(
-        text(
-            "INSERT INTO hr.holiday (holiday_date, name, status, updated_by)"
-            " VALUES (:d, :n, :s, :u) ON CONFLICT (holiday_date) DO UPDATE"
-            " SET name = EXCLUDED.name, status = EXCLUDED.status, updated_at = now(),"
-            " updated_by = EXCLUDED.updated_by"
-        ),
-        {"d": holiday_date, "n": body.name, "s": body.status, "u": user.user_id},
-    )
-    record_audit(
-        conn,
-        actor_user_id=user.user_id,
-        action="HOLIDAY_SET",
-        entity_type="holiday",
-        entity_id=holiday_date.isoformat(),
-        changes={"name": body.name, "status": body.status},
-        request=request,
-    )
-    return {"date": holiday_date.isoformat(), "name": body.name, "status": body.status}
-
-
-@router.delete("/holidays/{holiday_date}")
-def delete_holiday(
-    holiday_date: date,
-    request: Request,
-    user: HumanPrincipal = Depends(can_manage_settings),
-    conn: Connection = Depends(get_conn),
-) -> dict[str, Any]:
-    removed = conn.execute(
-        text("DELETE FROM hr.holiday WHERE holiday_date = :d"), {"d": holiday_date}
-    ).rowcount
-    if not removed:
-        raise not_found("Holiday not found.")
-    record_audit(
-        conn,
-        actor_user_id=user.user_id,
-        action="HOLIDAY_REMOVED",
-        entity_type="holiday",
-        entity_id=holiday_date.isoformat(),
-        changes={},
-        request=request,
-    )
-    return {"date": holiday_date.isoformat(), "removed": True}
 
 
 # ---- work context (copy of Audit Core assignments) -----------------------------------------

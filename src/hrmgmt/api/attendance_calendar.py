@@ -112,7 +112,15 @@ def team_weekly(
     # Who was on which project that week: everyone with an assignment on any day of it.
     members: dict[tuple[str, str | None], dict[str, Any]] = {}
     on_projects: dict[str, dict[str | None, str | None]] = defaultdict(dict)
-    for r in build_rows(conn, start, min(end, today), today=today, closed_today=_closed(conn, now)):
+    for r in build_rows(
+        conn,
+        start,
+        min(end, today),
+        today=today,
+        closed_today=_closed(conn, now),
+        now=now,
+        values=cfg.load_all(conn),
+    ):
         on_projects[r.employee_id][r.project_code] = r.project_name
         key = (r.employee_id, r.project_code)
         entry = members.setdefault(

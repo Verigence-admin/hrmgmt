@@ -1,5 +1,7 @@
 """Leave arithmetic. All days are counted on the server: Sundays and declared holidays are not
-leave days, a half day is 0.5, and a request stays inside one calendar year.
+leave days, a half day is 0.5, and a request stays inside one calendar year. Holidays are the
+person's own (hrmgmt.holidays): on a half-day holiday only half the day is a working day, so a
+full day's leave across it counts 0.5, and half-day leave on it is refused (7 Nov 2026).
 
 Paid leave is earned, not granted (product owner, 4 Nov 2026). Completing a block of attendance
 days (`leave.accrual_attendance_days`, 22) earns `leave.accrual_paid_days` (1) paid leave, up to a
@@ -7,7 +9,9 @@ cap on the balance (`leave.paid_balance_cap`, 3); what the cap stops is recorded
 of attendance is a working day with a check-in: it counts 1, or 0.5 when a late, early or
 out-of-fence exception on it was rejected. A day whose exception is still waiting stops the count
 there until it is decided, so the blocks never change once written. Days worked on a Sunday or
-holiday earn a comp-off day instead (once approved), not attendance days.
+holiday earn a comp-off day instead (once approved), not attendance days; work on the off half of
+a half-day holiday earns half a comp-off day. A half-day holiday whose working half was attended
+counts as one attendance day.
 
 Special occasion leave has its own yearly quota (`leave.special_days_per_year`)."""
 
@@ -19,10 +23,10 @@ from typing import Any
 
 from sqlalchemy import Connection, text
 
+from hrmgmt import holidays as hol
 from hrmgmt import settings_store as cfg
 from hrmgmt.attendance_correction import VALUES, apply_to_units
 from hrmgmt.errors import ApiError
-from hrmgmt.timeutil import is_sunday
 
 # Leave paid from a balance. PAID and COMP_OFF balances carry over the years; SPECIAL is a quota
 # per calendar year. SICK and EARNED exist only in history (the yearly allowance before Nov 2026).
@@ -33,7 +37,9 @@ MAX_RANGE_DAYS = 60
 _ZERO = Decimal(0)
 
 
-def leave_days(conn: Connection, start: date, end: date, half_day: bool) -> Decimal:
+def leave_days(
+    conn: Connection, start: date, end: date, half_day: bool, employee_id: str | None
+) -> Decimal:
     if end < start:
         raise ApiError(422, "LEAVE_DATES_INVALID", "The end date is before the start date.")
     if start.year != end.year:
@@ -48,28 +54,27 @@ def leave_days(conn: Connection, start: date, end: date, half_day: bool) -> Deci
         )
     if half_day and start != end:
         raise ApiError(422, "LEAVE_DATES_INVALID", "A half day is for a single date.")
-    holidays = declared_holidays(conn, start, end)
-    count = sum(1 for day in _days(start, end) if not is_sunday(day) and day not in holidays)
+    holidays = hol.holidays_for(conn, employee_id, start, end)
+    count = sum((hol.working_fraction(day, holidays.get(day)) for day in _days(start, end)), _ZERO)
     if count == 0:
         raise ApiError(422, "LEAVE_NO_WORKING_DAYS", "There are no working days in these dates.")
-    return Decimal("0.5") if half_day else Decimal(count)
+    if half_day:
+        half = hol.half_day(start, holidays.get(start))
+        if half is not None:
+            off = "morning" if half.day_part == hol.MORNING else "afternoon"
+            raise ApiError(
+                422,
+                "LEAVE_HALF_DAY_ON_HALF_HOLIDAY",
+                f"{start:%d %b %Y} is already a half-day holiday ({half.name}, {off} off), so only"
+                " the other half is a working day. Apply for a full day instead: it counts as half"
+                " a day of leave.",
+            )
+        return Decimal("0.5")
+    return count
 
 
 def _days(start: date, end: date) -> list[date]:
     return [start + timedelta(days=i) for i in range((end - start).days + 1)]
-
-
-def declared_holidays(conn: Connection, start: date, end: date) -> set[date]:
-    return {
-        r[0]
-        for r in conn.execute(
-            text(
-                "SELECT holiday_date FROM hr.holiday WHERE status = 'DECLARED'"
-                " AND holiday_date BETWEEN :a AND :b"
-            ),
-            {"a": start, "b": end},
-        )
-    }
 
 
 def ensure_grants(conn: Connection, employee_id: str, year: int) -> None:
@@ -139,11 +144,13 @@ def attendance_units(
     if not rows and not corrected:
         return []
     days = [r[0] for r in rows] + list(corrected)
-    holidays = declared_holidays(conn, min(days), max(days))
+    holidays = hol.holidays_for(conn, employee_id, min(days), max(days))
     out: list[tuple[date, Decimal | None]] = []
     for day, waiting, rejected in rows:
-        if is_sunday(day) or day in holidays:
+        if hol.is_off_day(day, holidays.get(day)):
             continue  # off-day work earns a comp-off, not an attendance day
+        # A half-day holiday whose working half was attended counts as a whole attendance day
+        # (a choice the product owner may change).
         if waiting:
             out.append((day, None))
         else:
@@ -234,7 +241,8 @@ def _credit_comp_offs(conn: Connection, employee_id: str) -> None:
     rows = conn.execute(
         text(
             """
-            SELECT x.exception_id, x.work_date FROM hr.attendance_exception x
+            SELECT x.exception_id, x.work_date, coalesce(x.comp_off_days, 1)
+            FROM hr.attendance_exception x
             WHERE x.employee_id = CAST(:e AS uuid) AND x.kind = 'OFF_DAY_WORK'
               AND x.status = 'APPROVED' AND x.decided_at >= :s
               AND NOT EXISTS (SELECT 1 FROM hr.leave_ledger l
@@ -244,17 +252,23 @@ def _credit_comp_offs(conn: Connection, employee_id: str) -> None:
         ),
         {"e": employee_id, "s": start},
     ).all()
-    for exception_id, work_date in rows:
+    for exception_id, work_date, days in rows:
+        half = Decimal(days) < 1
         conn.execute(
             text(
                 "INSERT INTO hr.leave_ledger (employee_id, leave_type, leave_year, entry_type, days,"
-                " note, exception_id) VALUES (CAST(:e AS uuid), 'COMP_OFF', :y, 'EARN', 1, :n,"
+                " note, exception_id) VALUES (CAST(:e AS uuid), 'COMP_OFF', :y, 'EARN', :d, :n,"
                 " CAST(:x AS uuid)) ON CONFLICT DO NOTHING"
             ),
             {
                 "e": employee_id,
                 "y": work_date.year,
-                "n": f"Comp-off for working on {work_date.isoformat()}",
+                "d": Decimal(days),
+                "n": (
+                    f"Half a comp-off for working the holiday half on {work_date.isoformat()}"
+                    if half
+                    else f"Comp-off for working on {work_date.isoformat()}"
+                ),
                 "x": str(exception_id),
             },
         )

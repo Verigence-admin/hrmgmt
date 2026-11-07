@@ -246,7 +246,9 @@ def test_team_month_shows_working_days_holidays_leave_and_absence(world, migrate
         "/hr/v1/attendance/team", params={"month": "2026-10"}, headers=world.headers(keeper)
     ).json()
     assert body["summary"]["sundays"] == 4
-    assert body["summary"]["holidays"] == [{"date": "2026-10-20", "name": "Vijaya Dasami"}]
+    assert body["summary"]["holidays"] == [
+        {"date": "2026-10-20", "name": "Vijaya Dasami", "dayPart": "FULL_DAY"}
+    ]
     assert body["summary"]["workingDays"] == 26 and body["summary"]["workingDaysSoFar"] == 17
     mine = [e for e in body["employees"] if e["employeeCode"] == emp["employeeCode"]][0]
     assert mine["daysPresent"] == 2 and mine["offDayWorked"] == 1 and mine["daysOnLeave"] == 1

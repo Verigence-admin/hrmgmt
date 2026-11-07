@@ -12,6 +12,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from sqlalchemy import Connection, text
 
+from hrmgmt import holidays as hol
 from hrmgmt import permissions as perm
 from hrmgmt import settings_store as cfg
 from hrmgmt import workcontext as wc
@@ -65,9 +66,16 @@ def daily_attendance(
     if day > today:
         raise ApiError(422, "HR_VALIDATION_FAILED", "A future day has no attendance yet.")
     rows = build_rows(
-        conn, day, day, today=today, project_code=project_code, closed_today=_closed(conn, now)
+        conn,
+        day,
+        day,
+        today=today,
+        project_code=project_code,
+        closed_today=_closed(conn, now),
+        now=now,
+        values=cfg.load_all(conn),
     )
-    kind, holiday_name = day_kind(conn, day)
+    kind, holiday_name = day_kind(conn, day, None)
     people: dict[str, Row] = {}
     for r in rows:
         previous = people.get(r.employee_id)
@@ -88,6 +96,8 @@ def daily_attendance(
         "date": day.isoformat(),
         "dayKind": kind,
         "holiday": holiday_name,
+        # Company-wide above; every declared holiday of the day (half days, projects, outlets) here.
+        "holidays": hol.declared_on(conn, day),
         "summary": {
             "employees": len(people),
             "checkedIn": sum(1 for r in people.values() if r.check_in_at),
@@ -157,6 +167,8 @@ def attendance_report(
         today=today,
         project_code=project_code,
         closed_today=_closed(conn, clock()),
+        now=clock(),
+        values=cfg.load_all(conn),
     )
 
     book = Workbook()
@@ -505,7 +517,15 @@ def team_daily_attendance(
     projects = _lead_projects(conn, authorizer, user, now)
     if project_code and projects is not None and project_code not in projects:
         raise forbidden("You do not lead that project.")
-    all_rows = build_rows(conn, day, day, today=today, closed_today=_closed(conn, now))
+    all_rows = build_rows(
+        conn,
+        day,
+        day,
+        today=today,
+        closed_today=_closed(conn, now),
+        now=now,
+        values=cfg.load_all(conn),
+    )
     rows = [
         r
         for r in all_rows
@@ -515,7 +535,7 @@ def team_daily_attendance(
     by_project: dict[tuple[str | None, str | None], list[Row]] = defaultdict(list)
     for r in rows:
         by_project[(r.project_code, r.project_name)].append(r)
-    kind, holiday_name = day_kind(conn, day)
+    kind, holiday_name = day_kind(conn, day, None)
     shared = _shared_projects(all_rows)
     week = week_start(day)
     by_person = cells(
@@ -546,6 +566,8 @@ def team_daily_attendance(
         "date": day.isoformat(),
         "dayKind": kind,
         "holiday": holiday_name,
+        # Company-wide above; every declared holiday of the day (half days, projects, outlets) here.
+        "holidays": hol.declared_on(conn, day),
         "summary": _summary(rows),
         "projects": [
             {"projectCode": code, "projectName": name, "summary": _summary(items)}
