@@ -28,10 +28,16 @@ router = APIRouter(prefix="/hr/v1", tags=["Holidays"])
 can_manage = require_permission(perm.HR_SETTINGS_MANAGE)
 
 DayPart = Literal["FULL_DAY", "MORNING", "AFTERNOON"]
+Kind = Literal["HOLIDAY", "WORKING_DAY"]
 AppliesTo = Literal["ALL", "SELECTED"]
 Status = Literal["TENTATIVE", "DECLARED"]
 NOTE = "Tentative dates are not final. Final holidays are declared by HR."
 _PART_WORDS = {"FULL_DAY": "full day", "MORNING": "morning off", "AFTERNOON": "afternoon off"}
+
+
+def _what(r: Any) -> str:
+    """How the clash message names an entry: "full day", "morning off", "working Sunday"."""
+    return "working Sunday" if r["kind"] == hol.WORKING_DAY else _PART_WORDS[r["day_part"]]
 
 
 # ---- reading ---------------------------------------------------------------------------------
@@ -69,6 +75,8 @@ def _item(r: Any, scope: list[dict[str, Any]]) -> dict[str, Any]:
         "name": r["name"],
         "status": r["status"],
         "dayPart": r["day_part"],
+        # HOLIDAY, or WORKING_DAY: a Sunday made a working day (7 Nov 2026).
+        "kind": r["kind"],
         "appliesTo": r["applies_to"],
         "scope": scope,
         "updatedAt": r["updated_at"].isoformat() if r["updated_at"] else None,
@@ -79,7 +87,7 @@ def _live(conn: Connection, where: str, params: dict[str, Any]) -> list[Any]:
     return list(
         conn.execute(
             text(
-                "SELECT holiday_id, holiday_date, name, status, day_part, applies_to, updated_at"
+                "SELECT holiday_id, holiday_date, name, status, day_part, applies_to, kind, updated_at"
                 f" FROM hr.holiday WHERE removed_at IS NULL AND {where}"
                 " ORDER BY holiday_date, CASE day_part WHEN 'FULL_DAY' THEN 0"
                 " WHEN 'MORNING' THEN 1 ELSE 2 END, applies_to, lower(name)"
@@ -95,7 +103,7 @@ def _one(conn: Connection, holiday_id: str, *, lock: bool = False) -> dict[str, 
     row = (
         conn.execute(
             text(
-                "SELECT holiday_id, holiday_date, name, status, day_part, applies_to, updated_at"
+                "SELECT holiday_id, holiday_date, name, status, day_part, applies_to, kind, updated_at"
                 " FROM hr.holiday WHERE holiday_id = CAST(:h AS uuid) AND removed_at IS NULL"
                 + (" FOR UPDATE" if lock else "")
             ),
@@ -136,6 +144,7 @@ def _caller_user_id(conn: Connection, user: HumanPrincipal) -> str | None:
 def list_holidays(
     year: Annotated[int | None, Query(ge=2020, le=2100)] = None,
     mine: Annotated[bool, Query()] = False,
+    include_working_days: Annotated[bool, Query(alias="includeWorkingDays")] = False,
     user: HumanPrincipal = Depends(current_user),
     authorizer: Authorizer = Depends(get_authorizer),
     conn: Connection = Depends(get_conn),
@@ -144,9 +153,14 @@ def list_holidays(
     everyone else, and HR with mine=true, sees only the holidays that apply to them on their date.
     A TENTATIVE date is only a proposal: only declared ones count as non-working days.
 
-    Each item keeps date, name and status as before, with holidayId, dayPart, appliesTo and scope."""
+    Each item keeps date, name and status as before, with holidayId, dayPart, appliesTo, kind and
+    scope. Working Sundays (kind WORKING_DAY) are listed only with includeWorkingDays=true, so an
+    earlier app version never shows one as a holiday."""
     rows = _live(
-        conn, "(CAST(:y AS int) IS NULL OR extract(year FROM holiday_date) = :y)", {"y": year}
+        conn,
+        "(CAST(:y AS int) IS NULL OR extract(year FROM holiday_date) = :y)"
+        " AND (CAST(:w AS boolean) OR kind = 'HOLIDAY')",
+        {"y": year, "w": include_working_days},
     )
     manager = not mine and _is_manager(authorizer, user)
     if not manager and rows:
@@ -242,6 +256,7 @@ class HolidayEntryIn(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     status: Status = "TENTATIVE"
     day_part: DayPart = Field(default="FULL_DAY", alias="dayPart")
+    kind: Kind = "HOLIDAY"
     applies_to: AppliesTo = Field(default="ALL", alias="appliesTo")
     scope: list[ScopeIn] = Field(default_factory=list, max_length=500)
 
@@ -339,7 +354,7 @@ def _check_clash(
         ):
             raise conflict(
                 "HOLIDAY_CLASH",
-                f"{r['name']} ({_PART_WORDS[r['day_part']]}) already covers some of the same people"
+                f"{r['name']} ({_what(r)}) already covers some of the same people"
                 f" on {day:%d %b %Y}. Change or remove it instead.",
             )
 
@@ -370,7 +385,7 @@ def _write_scope(conn: Connection, holiday_id: str, scope: list[dict[str, Any]])
 def _audit_view(item: dict[str, Any] | None) -> dict[str, Any] | None:
     if item is None:
         return None
-    return {k: item[k] for k in ("date", "name", "status", "dayPart", "appliesTo", "scope")}
+    return {k: item[k] for k in ("date", "name", "status", "dayPart", "appliesTo", "kind", "scope")}
 
 
 def _create(
@@ -384,15 +399,25 @@ def _create(
     day_part: str,
     applies_to: str,
     scope: list[dict[str, Any]],
+    kind: str = hol.HOLIDAY,
 ) -> dict[str, Any]:
     _check_clash(conn, day, day_part, applies_to, scope)
     holiday_id = str(
         conn.execute(
             text(
-                "INSERT INTO hr.holiday (holiday_date, name, status, day_part, applies_to,"
-                " created_by, updated_by) VALUES (:d, :n, :s, :p, :a, :u, :u) RETURNING holiday_id"
+                "INSERT INTO hr.holiday (holiday_date, name, status, day_part, applies_to, kind,"
+                " created_by, updated_by) VALUES (:d, :n, :s, :p, :a, :k, :u, :u)"
+                " RETURNING holiday_id"
             ),
-            {"d": day, "n": name, "s": status, "p": day_part, "a": applies_to, "u": user.user_id},
+            {
+                "d": day,
+                "n": name,
+                "s": status,
+                "p": day_part,
+                "a": applies_to,
+                "k": kind,
+                "u": user.user_id,
+            },
         ).scalar_one()
     )
     _write_scope(conn, holiday_id, scope)
@@ -422,13 +447,14 @@ def _change(
     day_part: str,
     applies_to: str,
     scope: list[dict[str, Any]],
+    kind: str = hol.HOLIDAY,
 ) -> dict[str, Any]:
     holiday_id = before["holidayId"]
     _check_clash(conn, day, day_part, applies_to, scope, exclude=holiday_id)
     conn.execute(
         text(
             "UPDATE hr.holiday SET holiday_date = :d, name = :n, status = :s, day_part = :p,"
-            " applies_to = :a, updated_at = now(), updated_by = :u"
+            " applies_to = :a, kind = :k, updated_at = now(), updated_by = :u"
             " WHERE holiday_id = CAST(:h AS uuid)"
         ),
         {
@@ -437,6 +463,7 @@ def _change(
             "s": status,
             "p": day_part,
             "a": applies_to,
+            "k": kind,
             "u": user.user_id,
             "h": holiday_id,
         },
@@ -478,6 +505,18 @@ def _remove(
     )
 
 
+def _kind_ok(body: HolidayEntryIn) -> None:
+    """A working day is a whole Sunday, and it is either set or not (declared)."""
+    if body.kind != hol.WORKING_DAY:
+        return
+    if body.holiday_date.weekday() != 6:
+        raise _invalid("A working Sunday must be on a Sunday. Other days are working days already.")
+    if body.day_part != hol.FULL_DAY:
+        raise _invalid("A working Sunday is a whole working day; it has no half.")
+    if body.status != hol.DECLARED:
+        raise _invalid("A working Sunday is declared or not set at all; it cannot be tentative.")
+
+
 def _year_ok(day: date) -> None:
     if not 2020 <= day.year <= 2100:
         raise _invalid("Choose a date from 2020 to 2100.")
@@ -491,6 +530,7 @@ def add_holiday(
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     _year_ok(body.holiday_date)
+    _kind_ok(body)
     scope = _labelled_scope(conn, body)
     return _create(
         conn,
@@ -502,6 +542,7 @@ def add_holiday(
         day_part=body.day_part,
         applies_to=body.applies_to,
         scope=scope,
+        kind=body.kind,
     )
 
 
@@ -526,6 +567,7 @@ def change_holiday(
 ) -> dict[str, Any]:
     before = _found(conn, holiday_id)
     _year_ok(body.holiday_date)
+    _kind_ok(body)
     scope = _labelled_scope(conn, body)
     return _change(
         conn,
@@ -538,6 +580,7 @@ def change_holiday(
         day_part=body.day_part,
         applies_to=body.applies_to,
         scope=scope,
+        kind=body.kind,
     )
 
 
@@ -567,7 +610,7 @@ class HolidayIn(BaseModel):
 def _company_full_day(conn: Connection, day: date) -> dict[str, Any] | None:
     rows = _live(
         conn,
-        "holiday_date = :d AND applies_to = 'ALL' AND day_part = 'FULL_DAY'",
+        "holiday_date = :d AND applies_to = 'ALL' AND day_part = 'FULL_DAY' AND kind = 'HOLIDAY'",
         {"d": day},
     )
     return _one(conn, str(rows[0]["holiday_id"]), lock=True) if rows else None

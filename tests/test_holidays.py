@@ -586,6 +586,7 @@ def test_calendar_and_hr_views_show_each_persons_own_holidays(world):
             "name": "Alpha day",
             "dayPart": "FULL_DAY",
             "appliesTo": "SELECTED",
+            "kind": "HOLIDAY",
             "scope": ["Project One"],
         }
     ]
@@ -700,7 +701,7 @@ def test_payroll_working_days_drop_by_half_and_present_days_follow(world):
         conn.rollback()
 
 
-def test_an_attended_half_day_holiday_counts_one_day_towards_earned_leave(world):
+def test_an_attended_half_day_holiday_counts_half_a_day_towards_earned_leave(world):
     eid, _, _ = pc_with_lead(world)
     half(world, "AFTERNOON")
     add(world, manager(world), WED, "Full")
@@ -715,7 +716,8 @@ def test_an_attended_half_day_holiday_counts_one_day_towards_earned_leave(world)
             )
     with world.engine.connect() as conn:
         units = lr.attendance_units(conn, eid, None, date(2026, 11, 13))
-    assert units == [(TUE, Decimal(1)), (THU, Decimal(1))]  # the full holiday earns a comp-off
+    # product owner, 7 Nov 2026: halves add up as halves; the full holiday earns a comp-off instead
+    assert units == [(TUE, Decimal("0.5")), (THU, Decimal(1))]
 
 
 def test_a_correction_is_refused_on_a_full_holiday_of_ones_own_project_only(world):
@@ -756,3 +758,182 @@ def test_the_short_day_email_speaks_of_the_working_half():
     assert "2 h 00 m" in notice.subject()
     assert "worked 2 h 00 m of the working half" in notice.body("Priya")
     assert "less than the 2.5 hours required" in notice.body("Priya")
+
+
+# ---- working Sundays (product owner, 7 Nov 2026) ------------------------------------------------
+
+SUN = date(2026, 11, 15)
+
+
+def other_project_pc(world: World):
+    hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
+    emp, user = world.employee(hr)
+    world.assign(user, "PC", tenant="t-b", project=("B", "Bravo"), outlet=OUTLET)
+    return emp["employeeId"], user
+
+
+def working_sunday(world: World, day: date = SUN, **body):
+    body.setdefault("appliesTo", "SELECTED")
+    body.setdefault("scope", [{"tenantId": "tenant-a"}])
+    return add(world, manager(world), day, "Stock audit Sunday", kind="WORKING_DAY", **body)
+
+
+def test_a_working_sunday_is_a_whole_declared_sunday_and_clashes_are_refused(world):
+    pc_with_lead(world)
+    other_project_pc(world)
+    hr = manager(world)
+    weekday = add(world, hr, TUE, "Not a Sunday", kind="WORKING_DAY")
+    assert weekday.status_code == 422 and "on a Sunday" in weekday.json()["detail"]
+    assert add(world, hr, SUN, "Half", kind="WORKING_DAY", dayPart="MORNING").status_code == 422
+    assert add(world, hr, SUN, "Maybe", kind="WORKING_DAY", status="TENTATIVE").status_code == 422
+    made = working_sunday(world)
+    assert made.status_code == 201, made.text
+    assert made.json()["kind"] == "WORKING_DAY" and made.json()["dayPart"] == "FULL_DAY"
+    clash = add(world, hr, SUN, "Puja", appliesTo="SELECTED", scope=[{"tenantId": "tenant-a"}])
+    assert clash.status_code == 409 and "(working Sunday)" in clash.json()["detail"]
+    everyone = add(world, hr, SUN, "Company picnic")
+    assert everyone.status_code == 409
+    elsewhere = add(world, hr, SUN, "Bravo puja", appliesTo="SELECTED", scope=[{"tenantId": "t-b"}])
+    assert elsewhere.status_code == 201  # another project: no clash
+    # earlier app versions never see a working Sunday in the list; the new screen asks for it
+    old = world.client.get("/hr/v1/holidays?year=2026", headers=world.headers(hr)).json()
+    assert "Stock audit Sunday" not in {i["name"] for i in old["items"]}
+    new = world.client.get(
+        "/hr/v1/holidays?year=2026&includeWorkingDays=true", headers=world.headers(hr)
+    ).json()
+    item = next(i for i in new["items"] if i["name"] == "Stock audit Sunday")
+    assert item["kind"] == "WORKING_DAY" and item["scope"][0]["tenantId"] == "tenant-a"
+    with world.engine.begin() as conn:  # the table refuses a malformed one too
+        with pytest.raises(Exception, match="holiday_working_day_shape"):
+            conn.execute(
+                text(
+                    "INSERT INTO hr.holiday (holiday_date, name, status, kind)"
+                    " VALUES ('2026-11-16', 'Monday', 'DECLARED', 'WORKING_DAY')"
+                )
+            )
+
+
+def test_a_working_sunday_is_an_ordinary_working_day_only_for_its_people(world):
+    eid, pc, _ = pc_with_lead(world)
+    other, other_user = other_project_pc(world)
+    assert working_sunday(world).status_code == 201
+    at(world, 10, 20, day=SUN)
+    mine = world.client.get("/hr/v1/attendance/today", headers=world.headers(pc)).json()
+    theirs = world.client.get("/hr/v1/attendance/today", headers=world.headers(other_user)).json()
+    assert mine["dayKind"] == "WORKING" and mine["workingSunday"] == {"name": "Stock audit Sunday"}
+    assert theirs["dayKind"] == "SUNDAY" and theirs["workingSunday"] is None
+    assert send(world, pc, "in", token(world, pc)).json()["needsApproval"] == []  # not off-day work
+    assert send(world, other_user, "in", token(world, other_user)).json()["needsApproval"] == [
+        "OFF_DAY_WORK"
+    ]
+    at(world, 13, 0, day=SUN)  # early and short, as on any working day
+    r = send(world, pc, "out", token(world, pc, "CHECK_OUT"), reason="Unwell")
+    assert set(r.json()["needsApproval"]) == {"EARLY_CHECK_OUT", "SHORT_DAY"}
+    with world.engine.connect() as conn:
+        # leave days, payroll working days and earned leave all count it as a working day
+        assert lr.leave_days(conn, date(2026, 11, 14), date(2026, 11, 16), False, eid) == 3
+        assert lr.leave_days(conn, date(2026, 11, 14), date(2026, 11, 16), False, other) == 2
+        month = date(2026, 11, 1)
+        assert pdata.working_days(month, pdata.declared_holidays(conn, month)[eid]) == 26
+        assert pdata.working_days(month, pdata.declared_holidays(conn, month)[other]) == 25
+        units = lr.attendance_units(conn, eid, None, date(2026, 11, 16))
+        assert units[-1][0] == SUN
+    at(world, 18, 0, day=date(2026, 11, 16))
+    cal = world.client.get(
+        "/hr/v1/attendance/calendar/me?month=2026-11", headers=world.headers(other_user)
+    ).json()
+    days = {d["date"]: d for w in cal["weeks"] for d in w["days"]}
+    assert days["2026-11-15"]["dayKind"] == "SUNDAY" and days["2026-11-15"]["workingSunday"] is None
+    hr_month = world.client.get(
+        "/hr/v1/attendance/team?month=2026-11",
+        headers=world.headers(world.grant(str(uuid.uuid4()), perm.HR_ATTENDANCE_READ_ALL)),
+    ).json()
+    rows = {e["employeeId"]: e for e in hr_month["employees"]}
+    assert rows[eid]["workingDays"] == 26 and rows[other]["workingDays"] == 25
+    assert hr_month["summary"]["workingSundays"] == [
+        {"date": "2026-11-15", "name": "Stock audit Sunday", "appliesTo": ["Project One"]}
+    ]
+
+
+def test_a_missed_working_sunday_is_an_absence_on_the_calendar(world):
+    eid, pc, _ = pc_with_lead(world)
+    assert working_sunday(world, appliesTo="ALL", scope=[]).status_code == 201
+    at(world, 18, 0, day=date(2026, 11, 16))
+    cal = world.client.get(
+        "/hr/v1/attendance/calendar/me?month=2026-11", headers=world.headers(pc)
+    ).json()
+    sunday = next(d for w in cal["weeks"] for d in w["days"] if d["date"] == "2026-11-15")
+    assert sunday["dayKind"] == "WORKING" and sunday["status"] == "ABSENT"
+    assert sunday["workingSunday"] == {"name": "Stock audit Sunday"}
+
+
+# ---- leave taken in the 6 weeks before a request (product owner, 7 Nov 2026) ----------------
+
+
+def approved(world: World, eid: str, leave_type: str, first: date, last: date, half=False):
+    with world.engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO hr.leave_request (employee_id, leave_type, from_date, to_date, half_day,"
+                " days, status, approver_rule, submitted_at) VALUES (CAST(:e AS uuid), :t, :a, :b,"
+                " :h, 1, 'APPROVED', 'TL_PM', now())"
+            ),
+            {"e": eid, "t": leave_type, "a": first, "b": last, "h": half},
+        )
+
+
+def test_recent_leave_counts_approved_paid_and_unpaid_days_in_the_six_weeks_before(world):
+    eid, pc, tl = pc_with_lead(world)
+    half(world, "AFTERNOON", day=date(2026, 11, 3), name="Eve")
+    approved(world, eid, "PAID", date(2026, 11, 2), date(2026, 11, 4))  # Mon-Wed, Tue half off
+    approved(world, eid, "UNPAID", date(2026, 11, 6), date(2026, 11, 6), half=True)
+    approved(
+        world, eid, "SPECIAL", date(2026, 9, 26), date(2026, 9, 29)
+    )  # Sat-Tue; window from 28 Sep
+    approved(world, eid, "UNPAID", date(2026, 11, 7), date(2026, 11, 8))  # Sat, Sun off
+    approved(world, eid, "SICK", date(2026, 9, 1), date(2026, 9, 2))  # before the window
+    with world.engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO hr.leave_request (employee_id, leave_type, from_date, to_date, half_day,"
+                " days, status, approver_rule, submitted_at) VALUES (CAST(:e AS uuid), 'PAID',"
+                " '2026-10-20', '2026-10-20', false, 1, 'PENDING', 'TL_PM', now())"
+            ),
+            {"e": eid},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO hr.leave_ledger (employee_id, leave_type, leave_year, entry_type, days,"
+                " note) VALUES (CAST(:e AS uuid), 'PAID', 2026, 'ADJUST', 5, 'test')"
+            ),
+            {"e": eid},
+        )
+    with world.engine.connect() as conn:
+        recent = lr.recent_leave(conn, eid, date(2026, 11, 9))
+    assert recent == {
+        "windowFrom": "2026-09-28",
+        "windowTo": "2026-11-08",
+        "paidDays": 4.5,  # 2.5 (the half-day holiday counts half) + 2 special in the window
+        "unpaidDays": 1.5,  # a half day + Saturday (Sunday left out); pending ones never count
+    }
+    preview = world.client.get(
+        "/hr/v1/leave/recent?fromDate=2026-11-09", headers=world.headers(pc)
+    ).json()
+    assert preview == recent
+    applied = world.client.post(
+        "/hr/v1/leave/requests",
+        json={"leave_type": "PAID", "from_date": "2026-11-09", "to_date": "2026-11-09"},
+        headers=world.headers(pc),
+    )
+    assert applied.status_code == 201, applied.text
+    assert applied.json()["recentLeave"] == recent
+    items = world.client.get("/hr/v1/approvals/leave", headers=world.headers(tl)).json()["items"]
+    mine = next(i for i in items if i["fromDate"] == "2026-11-09")
+    assert mine["recentLeave"] == recent
+    reviewer = world.grant(str(uuid.uuid4()), perm.HR_LEAVE_REVIEW)
+    detail = world.client.get(
+        f"/hr/v1/leave/employee/{eid}", headers=world.headers(reviewer)
+    ).json()
+    pending = next(r for r in detail["requests"] if r["fromDate"] == "2026-11-09")
+    assert pending["recentLeave"] == recent
+    assert all("recentLeave" not in r for r in detail["requests"] if r["status"] == "APPROVED")
