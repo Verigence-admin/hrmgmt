@@ -84,6 +84,8 @@ def _days(start: date, end: date) -> list[date]:
 # ---- birthday leave (SPECIAL) -----------------------------------------------------------------
 
 BIRTHDAY = "Birthday"
+# Note prefix of the quota correction entries written by migration 0027.
+QUOTA_CORRECTION = "Quota correction"
 NO_DATE_OF_BIRTH = "Your date of birth is not in myHR; ask HR to add it."
 
 
@@ -100,6 +102,27 @@ def birthday_window(dob: date, day: date) -> tuple[int, date, date]:
     falls in: from a birthday to the day before the next one."""
     year = day.year if day >= birthday_in(dob, day.year) else day.year - 1
     return year, birthday_in(dob, year), birthday_in(dob, year + 1) - timedelta(days=1)
+
+
+def first_open_year(dob: date, joined: date | None) -> int | None:
+    """The year of the first birthday on or after joining: earlier birthdays open nothing for this
+    person (product owner, 7 Nov 2026). None: no joining date, every birthday counts."""
+    if joined is None:
+        return None
+    return joined.year if birthday_in(dob, joined.year) >= joined else joined.year + 1
+
+
+def window_exists(dob: date, joined: date | None, year: int) -> bool:
+    first = first_open_year(dob, joined)
+    return first is None or year >= first
+
+
+def date_of_joining(conn: Connection, employee_id: str) -> date | None:
+    value = conn.execute(
+        text("SELECT date_of_joining FROM hr.employee WHERE employee_id = CAST(:e AS uuid)"),
+        {"e": employee_id},
+    ).scalar()
+    return value if isinstance(value, date) else None
 
 
 def date_of_birth(conn: Connection, employee_id: str) -> date | None:
@@ -121,6 +144,15 @@ def special_window(conn: Connection, employee_id: str, start: date, end: date) -
     if dob is None:
         raise _special_refused("LEAVE_NO_DATE_OF_BIRTH", NO_DATE_OF_BIRTH)
     year, _, last = birthday_window(dob, start)
+    joined = date_of_joining(conn, employee_id)
+    if not window_exists(dob, joined, year):
+        first = first_open_year(dob, joined)
+        assert first is not None
+        raise _special_refused(
+            "LEAVE_BIRTHDAY_NOT_OPEN",
+            f"Birthday leave opens on your birthday, {birthday_in(dob, first):%d %b %Y}, the first"
+            " birthday after you joined.",
+        )
     if end > last:
         opens = last + timedelta(days=1)
         raise _special_refused(
@@ -147,6 +179,8 @@ def ensure_grants(conn: Connection, employee_id: str, year: int) -> None:
     dob = date_of_birth(conn, employee_id)
     if days <= 0 or dob is None:
         return
+    if not window_exists(dob, date_of_joining(conn, employee_id), year):
+        return  # a birthday before joining opens nothing
     conn.execute(
         text(
             "INSERT INTO hr.leave_ledger (employee_id, leave_type, leave_year, entry_type, days, note)"
@@ -391,9 +425,13 @@ def progress(conn: Connection, employee_id: str, today: date) -> dict[str, Any]:
 
 
 def special_year_for(conn: Connection, employee_id: str, day: date) -> int | None:
-    """The birthday year a date's birthday leave belongs to (None: no date of birth)."""
+    """The birthday year a date's birthday leave belongs to (None: no date of birth, or that
+    birthday came before joining, so there is no birthday leave for that date)."""
     dob = date_of_birth(conn, employee_id)
-    return birthday_window(dob, day)[0] if dob else None
+    if dob is None:
+        return None
+    year = birthday_window(dob, day)[0]
+    return year if window_exists(dob, date_of_joining(conn, employee_id), year) else None
 
 
 def balances(
@@ -425,11 +463,14 @@ def balances(
             " WHERE employee_id = CAST(:e AS uuid) AND leave_type IN ('PAID', 'COMP_OFF')"
             " GROUP BY leave_type, entry_type"
             " UNION ALL"
-            " SELECT leave_type, entry_type, sum(days) FROM hr.leave_ledger"
-            " WHERE employee_id = CAST(:e AS uuid) AND leave_type = 'SPECIAL' AND leave_year = :y"
-            " GROUP BY leave_type, entry_type"
+            # A quota correction (migration 0027) lowers what was granted; it is not leave used.
+            " SELECT leave_type, entry_type, sum(days) FROM ("
+            "   SELECT leave_type, days, CASE WHEN entry_type = 'ADJUST' AND note LIKE :qc"
+            "   THEN 'GRANT' ELSE entry_type END AS entry_type FROM hr.leave_ledger"
+            "   WHERE employee_id = CAST(:e AS uuid) AND leave_type = 'SPECIAL' AND leave_year = :y"
+            " ) s GROUP BY leave_type, entry_type"
         ),
-        {"e": employee_id, "y": year},
+        {"e": employee_id, "y": year, "qc": QUOTA_CORRECTION + "%"},
     ):
         bucket = out[r[0]]
         total = Decimal(r[2])
@@ -505,8 +546,21 @@ def special_info(conn: Connection, employee_id: str, today: date) -> dict[str, A
     if dob is None:
         return {"dateOfBirthOnFile": False, "message": NO_DATE_OF_BIRTH}
     year, first, last = birthday_window(dob, today)
+    opens = first_open_year(dob, date_of_joining(conn, employee_id))
+    if opens is not None and year < opens:
+        # Joined after this window's birthday: nothing until the first birthday after joining.
+        first = birthday_in(dob, opens)
+        return {
+            "dateOfBirthOnFile": True,
+            "open": False,
+            "birthdayYear": opens,
+            "availableFrom": first.isoformat(),
+            "availableUntil": birthday_window(dob, first)[2].isoformat(),
+            "nextOpensOn": first.isoformat(),
+        }
     return {
         "dateOfBirthOnFile": True,
+        "open": True,
         "birthdayYear": year,
         "availableFrom": first.isoformat(),
         "availableUntil": last.isoformat(),

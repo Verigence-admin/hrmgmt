@@ -142,6 +142,7 @@ def test_the_balance_card_says_which_birthday_window_it_is(world):
     b = world.client.get("/hr/v1/leave/balance", headers=world.headers(pc)).json()
     assert b["birthdayLeave"] == {
         "dateOfBirthOnFile": True,
+        "open": True,
         "birthdayYear": 2026,
         "availableFrom": "2026-08-30",
         "availableUntil": "2027-08-29",
@@ -207,3 +208,84 @@ def test_recent_leave_counts_only_days_already_taken(world):
         "/hr/v1/leave/recent?fromDate=2026-11-03", headers=world.headers(pc)
     ).json()
     assert earlier["windowTo"] == "2026-11-02" and earlier["unpaidDays"] == 1.0
+
+
+# ---- new joiners: the first birthday on or after joining (product owner, 7 Nov 2026) ---------
+
+
+def joined(world, eid: str, day: str) -> None:
+    with world.engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE hr.employee SET date_of_joining = :d WHERE employee_id = CAST(:e AS uuid)"
+            ),
+            {"d": day, "e": eid},
+        )
+
+
+def test_a_birthday_before_joining_opens_nothing(world):
+    world.clock.set(ist(2026, 11, 7, 10, 0))
+    eid, pc, tl = team(world)  # born 30 Aug
+    joined(world, eid, "2026-10-13")  # after the 2026 birthday
+    assert lr.first_open_year(date(1990, 8, 30), date(2026, 10, 13)) == 2027
+    assert lr.first_open_year(date(1990, 8, 30), date(2026, 8, 30)) == 2026  # on the day counts
+    r = birthday(world, pc, "2026-11-10")
+    assert r.status_code == 422 and r.json()["code"] == "LEAVE_BIRTHDAY_NOT_OPEN"
+    assert r.json()["detail"].startswith("Birthday leave opens on your birthday, 30 Aug 2027")
+    b = world.client.get("/hr/v1/leave/balance", headers=world.headers(pc)).json()
+    assert b["birthdayLeave"]["open"] is False
+    assert b["birthdayLeave"]["nextOpensOn"] == "2027-08-30"
+    special = balance(world, pc, "SPECIAL")
+    assert special["balance"] == 0.0 and special["granted"] == 0.0
+    with world.engine.connect() as conn:  # no grant is written for that birthday
+        grants = conn.execute(
+            text(
+                "SELECT count(*) FROM hr.leave_ledger WHERE employee_id = CAST(:e AS uuid)"
+                " AND leave_type = 'SPECIAL'"
+            ),
+            {"e": eid},
+        ).scalar_one()
+    assert grants == 0
+    assert birthday(world, pc, "2027-08-30").status_code == 201  # the first birthday after joining
+
+
+def test_an_old_grant_for_a_birthday_before_joining_is_not_available(world):
+    world.clock.set(ist(2026, 11, 7, 10, 0))
+    eid, pc, _ = team(world)
+    with world.engine.begin() as conn:  # written before the joining rule
+        conn.execute(
+            text(
+                "INSERT INTO hr.leave_ledger (employee_id, leave_type, leave_year, entry_type, days,"
+                " note) VALUES (CAST(:e AS uuid), 'SPECIAL', 2026, 'GRANT', 1, 'Yearly quota')"
+            ),
+            {"e": eid},
+        )
+    joined(world, eid, "2026-10-13")
+    assert balance(world, pc, "SPECIAL")["available"] == 0.0
+
+
+def test_a_pending_request_from_before_the_rule_is_refused_at_approval(world):
+    world.clock.set(ist(2026, 11, 7, 10, 0))
+    eid, pc, tl = team(world)
+    waiting = birthday(world, pc, "2026-11-10")  # no joining date yet: every birthday counts
+    assert waiting.status_code == 201, waiting.text
+    joined(world, eid, "2026-10-13")
+    refused = decide(world, tl, waiting.json()["requestId"])
+    assert refused.status_code == 422 and refused.json()["code"] == "LEAVE_BIRTHDAY_NOT_OPEN"
+    assert "30 Aug 2027" in refused.json()["detail"]
+
+
+def test_a_quota_correction_lowers_the_grant_not_the_leave_used(world):
+    eid, pc, _ = team(world)
+    with world.engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO hr.leave_ledger (employee_id, leave_type, leave_year, entry_type, days,"
+                " note) VALUES (CAST(:e AS uuid), 'SPECIAL', 2026, 'GRANT', 2, 'old'),"
+                " (CAST(:e AS uuid), 'SPECIAL', 2026, 'ADJUST', -1,"
+                " 'Quota correction: birthday leave is 1 day(s) per birthday')"
+            ),
+            {"e": eid},
+        )
+    special = balance(world, pc, "SPECIAL")
+    assert (special["granted"], special["used"], special["balance"]) == (1.0, 0.0, 1.0)

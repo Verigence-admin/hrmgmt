@@ -217,7 +217,10 @@ Each phase is deployed and checked on DEV before the next starts.
   leave only: each birthday (date of birth; 29 Feb is 28 Feb in other years) opens
   `leave.special_days_per_year` days, usable from the birthday to the day before the next one, never
   before it and never carried over. Ledger rows carry the birthday's year in leave_year. No date of
-  birth, no birthday leave. Approval checks the rule again.
+  birth, no birthday leave. Approval checks the rule again. A birthday before the date of joining
+  opens nothing: the first window is the first birthday on or after joining (old grants for an
+  earlier birthday are never read). Migration 0027 adds one "Quota correction" ADJUST where a grant
+  exceeds the setting; balances count it against the grant, not as leave used.
 - **Leave taken recently (product owner, 7 Nov 2026).** Every leave request shows the approver (and
   the employee while applying) the approved paid and unpaid leave days already taken in the 42 days
   ending the day before its from date or yesterday, whichever is earlier, counted like leave days. A removed holiday

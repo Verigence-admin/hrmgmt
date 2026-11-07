@@ -81,3 +81,86 @@ def test_downgrading_past_the_holiday_migration_is_refused(migrated_engine):
     # Migrations here are forward-only (README): there is no way back to the one-row-per-date table.
     with pytest.raises(RuntimeError, match="forward-only"):
         command.downgrade(alembic_config(), "0024_attendance_correction")
+
+
+def test_birthday_leave_grants_above_the_quota_are_corrected_once(migrated_engine):
+    """Migration 0027: a SPECIAL grant above leave.special_days_per_year gets one ADJUST down to it,
+    unless more was used, or that birthday came before joining (the joining rule wins)."""
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS hr CASCADE"))
+    command.upgrade(alembic_config(), "0026_working_sunday")
+    people = {
+        # name: (date of birth, joined, granted, used)
+        "fix": ("1990-08-30", "2025-01-01", 2, 0),
+        "used_one": ("1990-03-01", "2025-01-01", 2, 1),
+        "used_two": ("1990-03-01", "2025-01-01", 2, 2),
+        "joined_after": ("1990-08-30", "2026-10-13", 2, 0),
+        "leap": ("1992-02-29", "2026-02-28", 2, 0),  # 28 Feb 2026 birthday, joined that day
+        "right": ("1990-08-30", "2025-01-01", 1, 0),
+    }
+    ids = {}
+    with migrated_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO hr.setting (key, value) VALUES"
+                " ('leave.special_days_per_year', CAST('1' AS jsonb))"
+            )
+        )
+        for name, (dob, joined, granted, used) in people.items():
+            eid = conn.execute(
+                text(
+                    "INSERT INTO hr.employee (employee_code, full_name, personal_email, created_by,"
+                    " updated_by, date_of_birth, date_of_joining) VALUES (:c, :n, :m, 't', 't',"
+                    " :b, :j) RETURNING employee_id"
+                ),
+                {"c": name.upper(), "n": name, "m": f"{name}@example.com", "b": dob, "j": joined},
+            ).scalar_one()
+            ids[name] = str(eid)
+            conn.execute(
+                text(
+                    "INSERT INTO hr.leave_ledger (employee_id, leave_type, leave_year, entry_type,"
+                    " days, note) VALUES (:e, 'SPECIAL', 2026, 'GRANT', :g, 'Yearly quota')"
+                ),
+                {"e": eid, "g": granted},
+            )
+            if used:
+                conn.execute(
+                    text(
+                        "INSERT INTO hr.leave_ledger (employee_id, leave_type, leave_year,"
+                        " entry_type, days) VALUES (:e, 'SPECIAL', 2026, 'DEDUCT', :d)"
+                    ),
+                    {"e": eid, "d": -used},
+                )
+    command.upgrade(alembic_config(), "head")
+    command.stamp(alembic_config(), "0026_working_sunday")
+    command.upgrade(alembic_config(), "head")  # run again: nothing more is added
+
+    def corrections(name):
+        with migrated_engine.connect() as conn:
+            return [
+                (float(d), n)
+                for d, n in conn.execute(
+                    text(
+                        "SELECT days, note FROM hr.leave_ledger WHERE employee_id = CAST(:e AS uuid)"
+                        " AND entry_type = 'ADJUST'"
+                    ),
+                    {"e": ids[name]},
+                )
+            ]
+
+    fixed = corrections("fix")
+    assert len(fixed) == 1 and fixed[0][0] == -1.0
+    assert fixed[0][1].startswith("Quota correction: birthday leave is 1 day(s) per birthday")
+    assert len(corrections("used_one")) == 1
+    assert corrections("used_two") == []
+    assert corrections("joined_after") == []
+    assert len(corrections("leap")) == 1
+    assert corrections("right") == []
+    with migrated_engine.connect() as conn:
+        grants = conn.execute(
+            text("SELECT count(*) FROM hr.leave_ledger WHERE entry_type = 'GRANT'")
+        ).scalar_one()
+    assert grants == len(people)  # nothing deleted
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS hr CASCADE"))
+    command.upgrade(alembic_config(), "head")
