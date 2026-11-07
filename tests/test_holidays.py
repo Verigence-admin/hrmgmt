@@ -909,7 +909,7 @@ def test_recent_leave_counts_approved_paid_and_unpaid_days_in_the_six_weeks_befo
             {"e": eid},
         )
     with world.engine.connect() as conn:
-        recent = lr.recent_leave(conn, eid, date(2026, 11, 9))
+        recent = lr.recent_leave(conn, eid, date(2026, 11, 9), date(2026, 11, 9))
     assert recent == {
         "windowFrom": "2026-09-28",
         "windowTo": "2026-11-08",

@@ -213,9 +213,14 @@ Each phase is deployed and checked on DEV before the next starts.
   kind WORKING_DAY (a whole Sunday, declared). For those people it is an ordinary working day in
   attendance, leave, payroll and earned leave, and work on it is not off-day work. A working Sunday
   and a holiday for the same people on the same date are refused.
+- **Birthday leave (product owner, 7 Nov 2026).** Special occasion leave (type SPECIAL) is birthday
+  leave only: each birthday (date of birth; 29 Feb is 28 Feb in other years) opens
+  `leave.special_days_per_year` days, usable from the birthday to the day before the next one, never
+  before it and never carried over. Ledger rows carry the birthday's year in leave_year. No date of
+  birth, no birthday leave. Approval checks the rule again.
 - **Leave taken recently (product owner, 7 Nov 2026).** Every leave request shows the approver (and
-  the employee while applying) the approved paid and unpaid leave days in the 42 days before its
-  from date, counted like leave days. A removed holiday
+  the employee while applying) the approved paid and unpaid leave days already taken in the 42 days
+  ending the day before its from date or yesterday, whichever is earlier, counted like leave days. A removed holiday
   keeps its row; every add, change and removal is audited with before and after.
 
 ## 16. The HR module must not affect Audit Core (rules, 3 October 2026)
