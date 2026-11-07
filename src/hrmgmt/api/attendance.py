@@ -5,6 +5,7 @@ import json
 import secrets
 import time
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 import structlog
@@ -22,6 +23,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Connection, text
 
+from hrmgmt import holidays as hol
 from hrmgmt import permissions as perm
 from hrmgmt import settings_store as cfg
 from hrmgmt import short_day
@@ -74,25 +76,11 @@ def _hash(token: str) -> str:
 # ---- working days --------------------------------------------------------------------------
 
 
-def day_kind(conn: Connection, day: date) -> tuple[str, str | None]:
-    """('WORKING', None), ('SUNDAY', None) or ('HOLIDAY', name). Only a declared holiday stops work."""
-    if is_sunday(day):
-        return "SUNDAY", None
-    row = conn.execute(
-        text("SELECT name FROM hr.holiday WHERE holiday_date = :d AND status = 'DECLARED'"),
-        {"d": day},
-    ).first()
-    if row:
-        return "HOLIDAY", str(row[0])
-    return "WORKING", None
-
-
-def tentative_holiday(conn: Connection, day: date) -> str | None:
-    row = conn.execute(
-        text("SELECT name FROM hr.holiday WHERE holiday_date = :d AND status = 'TENTATIVE'"),
-        {"d": day},
-    ).first()
-    return str(row[0]) if row else None
+def day_kind(conn: Connection, day: date, employee_id: str | None) -> tuple[str, str | None]:
+    """('WORKING', None), ('SUNDAY', None) or ('HOLIDAY', name) for one person (None: the company
+    as a whole, i.e. company-wide holidays only). Only a declared full-day holiday stops work; a
+    half-day holiday is a working day with half of it off (hrmgmt.holidays)."""
+    return hol.day_kind(day, hol.holiday_for(conn, employee_id, day))
 
 
 # ---- capture token -------------------------------------------------------------------------
@@ -150,9 +138,10 @@ def _exceptions_needed(
     reason: str | None,
     employee_roles: set[str],
     assignments: list[dict[str, Any]],
+    values: dict[str, Any],
 ) -> tuple[bool, float | None, dict[str, Any] | None, list[str], list[str]]:
-    """Returns (fenced, distance, outlet, exception_kinds, flags). Pure decision logic."""
-    values = cfg.load_all(conn)
+    """Returns (fenced, distance, outlet, exception_kinds, flags). Pure decision logic. `values`
+    are the day's settings: on a half-day holiday the times of its working half."""
     ist = to_ist(now)
     kinds: list[str] = []
     flags: list[str] = []
@@ -200,6 +189,7 @@ def _reason_prompt(
     values: dict[str, Any],
     event: str,
     worked: timedelta | None = None,
+    half: hol.DayHoliday | None = None,
 ) -> str:
     parts = []
     if "OUT_OF_FENCE" in kinds and distance is not None:
@@ -213,10 +203,18 @@ def _reason_prompt(
     if "EARLY_CHECK_OUT" in kinds:
         parts.append(f"You are checking out before {values['attendance.check_out_earliest']}.")
     if short_day.KIND in kinds and worked is not None:
-        parts.append(
-            f"You have been checked in for {short_day.duration_text(worked)} today; the minimum is"
-            f" {int(values['attendance.min_work_hours'])} hours."
-        )
+        minimum = short_day.hours_text(values)
+        if half is not None:
+            parts.append(
+                f"Today is a half-day holiday ({half.name}). You have worked"
+                f" {short_day.duration_text(worked)} of the working half; the minimum is {minimum}"
+                " hours."
+            )
+        else:
+            parts.append(
+                f"You have been checked in for {short_day.duration_text(worked)} today; the minimum"
+                f" is {minimum} hours."
+            )
     side = "check-in" if event == "CHECK_IN" else "check-out"
     parts.append(f"Say why; your Team Lead will review this {side}.")
     return " ".join(parts)
@@ -247,11 +245,15 @@ def _record_event(
     employee_id = _own_employee_id(conn, user)
     now = clock()
     work_date = ist_date(now)
-    values = cfg.load_all(conn)
+    base_values = cfg.load_all(conn)
 
     # A Sunday or a declared holiday is a day off, but attendance can still be marked: it goes for
-    # approval (below) instead of being refused.
-    off_day = day_kind(conn, work_date)[0] in ("SUNDAY", "HOLIDAY")
+    # approval (below) instead of being refused. On a half-day holiday the other half is a working
+    # day, with its own times (product owner, 7 Nov 2026).
+    holiday = hol.holiday_for(conn, employee_id, work_date)
+    off_day = hol.is_off_day(work_date, holiday)
+    half = hol.half_day(work_date, holiday)
+    values = hol.effective_values(base_values, half.day_part if half else None)
 
     if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
         raise ApiError(422, "ATTENDANCE_LOCATION_INVALID", "The location is not valid.")
@@ -289,11 +291,17 @@ def _record_event(
     ):
         # Product owner (6 Nov 2026): no check-in by 17:00 on a working day and the system marks
         # the day Absent. If the person was at work, they raise an attendance correction.
+        today_note = (
+            f" Today the afternoon is a holiday ({half.name}), so the working half ends then."
+            if half is not None and half.day_part == hol.AFTERNOON
+            else ""
+        )
         raise ApiError(
             422,
             "ATTENDANCE_DAY_CLOSED",
             f"It is past {values['attendance.absent_after']}, so today has been marked Absent by"
-            " the system. If you were at work, raise an attendance correction for today.",
+            f" the system.{today_note} If you were at work, raise an attendance correction for"
+            " today.",
         )
     if event == "CHECK_OUT":
         if day is None or day["check_in_at"] is None:
@@ -319,6 +327,7 @@ def _record_event(
         reason=reason,
         employee_roles=roles,
         assignments=assignments,
+        values=values,
     )
     if off_day:
         # Being late or early means nothing on a day off; working on it needs approval instead.
@@ -329,9 +338,19 @@ def _record_event(
             flags.append("OFF_DAY")
     # Product owner (6 Nov 2026): less than the minimum hours between check-in and check-out on a
     # working day goes to the Team Lead, and the Project Managers are told.
+    # On a half-day holiday the short-day rule looks at the working half only, with half the
+    # minimum hours; time inside the off half of at least half the minimum is work on the holiday,
+    # which goes for approval like work on a day off and earns half a comp-off day.
     worked: timedelta | None = None
     if event == "CHECK_OUT" and not off_day and day is not None:
         worked = now - day["check_in_at"]
+        if half is not None:
+            worked_off, worked = hol.worked_in_halves(
+                work_date, half.day_part, day["check_in_at"], now, base_values
+            )
+            if hol.off_half_worked(worked_off, base_values):
+                kinds.append("OFF_DAY_WORK")
+                flags.append("OFF_HALF")
         if short_day.is_short(conn, employee_id, work_date, worked, values):
             kinds.append(short_day.KIND)
             flags.append(short_day.KIND)
@@ -347,7 +366,7 @@ def _record_event(
         raise ApiError(
             422,
             "ATTENDANCE_REASON_REQUIRED",
-            _reason_prompt(needs_reason, distance, outlet, values, event, worked),
+            _reason_prompt(needs_reason, distance, outlet, values, event, worked, half),
         )
 
     # The token: one use, for this person and this event, still within its window.
@@ -494,11 +513,14 @@ def _record_event(
             {"s": face_score, "r": face_ref, "a": attendance_id},
         )
     for exception_kind in kinds:
+        comp_off = None
+        if exception_kind == "OFF_DAY_WORK":
+            comp_off = "0.5" if half is not None else "1"
         conn.execute(
             text(
                 "INSERT INTO hr.attendance_exception"
-                " (attendance_id, employee_id, work_date, event, kind, reason)"
-                " VALUES (CAST(:a AS uuid), CAST(:e AS uuid), :d, :ev, :k, :r)"
+                " (attendance_id, employee_id, work_date, event, kind, reason, comp_off_days)"
+                " VALUES (CAST(:a AS uuid), CAST(:e AS uuid), :d, :ev, :k, :r, CAST(:c AS numeric))"
             ),
             {
                 "a": attendance_id,
@@ -507,6 +529,7 @@ def _record_event(
                 "ev": event,
                 "k": exception_kind,
                 "r": (reason or "").strip() or None,
+                "c": comp_off,
             },
         )
     if short_day.KIND in kinds and background is not None and day is not None:
@@ -519,6 +542,8 @@ def _record_event(
             reason=reason,
             pm_user_ids=wc.project_approvers(conn, employee_id, now, ("PM",)),
             values=values,
+            worked_in_half=worked if half is not None else None,
+            half_day=hol.half_day_words(half, base_values) if half is not None else None,
         )
         if notice is not None:
             # Sent after the answer goes back, so the mail server never slows the check-out.
@@ -725,8 +750,12 @@ def today(
     employee_id = _own_employee_id(conn, user)
     now = clock()
     work_date = ist_date(now)
-    kind, holiday = day_kind(conn, work_date)
-    values = cfg.load_all(conn)
+    declared = hol.holiday_for(conn, employee_id, work_date)
+    kind, holiday = hol.day_kind(work_date, declared)
+    half = hol.half_day(work_date, declared)
+    tentative = hol.holiday_for(conn, employee_id, work_date, status=hol.TENTATIVE)
+    base_values = cfg.load_all(conn)
+    values = hol.effective_values(base_values, half.day_part if half else None)
     row = (
         conn.execute(
             text(
@@ -761,7 +790,11 @@ def today(
         "serverTime": to_ist(now).isoformat(),
         "dayKind": kind,
         "holidayName": holiday,
-        "tentativeHoliday": tentative_holiday(conn, work_date),
+        # A half-day holiday stays a WORKING day (earlier app versions know only the three kinds);
+        # this says which half is off and from when.
+        "halfDayHoliday": hol.half_day_view(half, base_values),
+        "tentativeHoliday": tentative.name if tentative else None,
+        "tentativeHolidayDayPart": tentative.day_part if tentative else None,
         "day": day,
         "roles": roles,
         "geofenced": fenced,
@@ -777,6 +810,8 @@ def today(
             "lateAfter": values["attendance.late_after"],
             "checkOutEarliest": values["attendance.check_out_earliest"],
             "checkOut": values["attendance.check_out_standard"],
+            "absentAfter": values["attendance.absent_after"],
+            "minimumHours": float(values["attendance.min_work_hours"]),
         },
     }
 
@@ -857,25 +892,16 @@ def team_attendance(
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     """HR and the CEO: the month at a glance. The month's working days and holidays, and for every
-    active employee the days present, on leave and absent, work on a day off, and what waits for approval."""
+    active employee the days present, on leave and absent, work on a day off, and what waits for
+    approval. Holidays are per person (a holiday may be for some projects or outlets only, or for
+    half a day): a half-day holiday is half a working day."""
     now = clock()
     today = ist_date(now)
-    closed_today = closed_for_check_in(to_ist(now).time(), cfg.load_all(conn))
+    values = cfg.load_all(conn)
     first, nxt = _month_bounds(month, today)
-    holidays = {
-        r[0]: str(r[1])
-        for r in conn.execute(
-            text(
-                "SELECT holiday_date, name FROM hr.holiday WHERE status = 'DECLARED'"
-                " AND holiday_date >= :a AND holiday_date < :b ORDER BY holiday_date"
-            ),
-            {"a": first, "b": nxt},
-        )
-    }
+    last = nxt - timedelta(days=1)
     days = _month_days(first, nxt)
-    off = {d for d in days if is_sunday(d) or d in holidays}
-    working = [d for d in days if d not in off]
-    working_set = set(working)
+    company = hol.holidays_for(conn, None, first, last)
     present: dict[str, set[date]] = {}
     for employee_id, work_date in conn.execute(
         text(
@@ -886,37 +912,58 @@ def team_attendance(
     ):
         present.setdefault(str(employee_id), set()).add(work_date)
     leave = _leave_by_person(conn, first, nxt)
-    people = conn.execute(
-        text(
-            "SELECT e.employee_id, e.employee_code, e.full_name, e.date_of_joining,"
-            " (SELECT count(*) FROM hr.attendance_exception x"
-            "   WHERE x.employee_id = e.employee_id AND x.status = 'PENDING'"
-            "     AND x.work_date >= :a AND x.work_date < :b) AS pending"
-            " FROM hr.employee e WHERE e.employment_status = 'ACTIVE'"
-            " ORDER BY lower(e.full_name), e.employee_code"
-        ),
-        {"a": first, "b": nxt},
-    ).mappings()
+    people = (
+        conn.execute(
+            text(
+                "SELECT e.employee_id, e.employee_code, e.full_name, e.date_of_joining,"
+                " (SELECT count(*) FROM hr.attendance_exception x"
+                "   WHERE x.employee_id = e.employee_id AND x.status = 'PENDING'"
+                "     AND x.work_date >= :a AND x.work_date < :b) AS pending"
+                " FROM hr.employee e WHERE e.employment_status = 'ACTIVE'"
+                " ORDER BY lower(e.full_name), e.employee_code"
+            ),
+            {"a": first, "b": nxt},
+        )
+        .mappings()
+        .all()
+    )
+    by_person = hol.holidays_by_employee(conn, [str(r["employee_id"]) for r in people], first, last)
     employees = []
     for r in people:
         eid = str(r["employee_id"])
+        mine_holidays = by_person.get(eid, {})
+        share = {d: hol.working_fraction(d, mine_holidays.get(d)) for d in days}
+        working = [d for d in days if share[d] > 0]
+        off = [d for d in days if share[d] == 0]
         here = present.get(eid, set())
         mine = leave.get(eid, {})
         joined = r["date_of_joining"]
-        counted = [
-            d
-            for d in working
-            if (d < today or (d == today and closed_today)) and (joined is None or d >= joined)
-        ]
-        absent = sum(1 - mine.get(d, 0.0) for d in counted if d not in here)
+
+        def closed(d: date, hd: dict[date, hol.DayHoliday] = mine_holidays) -> bool:
+            if d < today:
+                return True
+            if d > today:
+                return False
+            part = hol.half_day(d, hd.get(d))
+            return hol.closed_for_check_in(now, part.day_part if part else None, values)
+
+        counted = [d for d in working if closed(d) and (joined is None or d >= joined)]
+        absent = sum(
+            float(share[d]) - min(mine.get(d, 0.0), float(share[d]))
+            for d in counted
+            if d not in here
+        )
         employees.append(
             {
                 "employeeId": eid,
                 "employeeCode": r["employee_code"],
                 "fullName": r["full_name"],
-                "daysPresent": sum(1 for d in working if d in here),
+                "workingDays": float(sum((share[d] for d in working), Decimal(0))),
+                "daysPresent": float(sum((share[d] for d in working if d in here), Decimal(0))),
                 "offDayWorked": sum(1 for d in off if d in here),
-                "daysOnLeave": sum(v for d, v in mine.items() if d in working_set and d <= today),
+                "daysOnLeave": sum(
+                    min(v, float(share[d])) for d, v in mine.items() if d in share and d <= today
+                ),
                 "daysAbsent": absent,
                 "daysCheckedIn": len(here),
                 "daysCheckedOut": 0,
@@ -933,18 +980,46 @@ def team_attendance(
     by_out = {str(e): int(n) for e, n in out_counts}
     for item in employees:
         item["daysCheckedOut"] = by_out.get(item["employeeId"], 0)
+    company_share = {d: hol.working_fraction(d, company.get(d)) for d in days}
     return {
         "month": first.strftime("%Y-%m"),
         "summary": {
-            "workingDays": len(working),
-            "workingDaysSoFar": sum(1 for d in working if d <= today),
+            # For the company as a whole (company-wide holidays); each person's own working days,
+            # with any project or outlet holidays of theirs, are on their row.
+            "workingDays": float(sum(company_share.values(), Decimal(0))),
+            "workingDaysSoFar": float(
+                sum((v for d, v in company_share.items() if d <= today), Decimal(0))
+            ),
             "sundays": sum(1 for d in days if is_sunday(d)),
             "holidays": [
-                {"date": d.isoformat(), "name": name} for d, name in sorted(holidays.items())
+                {"date": d.isoformat(), "name": h.name, "dayPart": h.day_part}
+                for d, h in sorted(company.items())
+                if not is_sunday(d)
             ],
+            "otherHolidays": _scoped_holidays(conn, first, last),
         },
         "employees": employees,
     }
+
+
+def _scoped_holidays(conn: Connection, first: date, last: date) -> list[dict[str, Any]]:
+    """Declared holidays of the month that are for some projects or outlets only."""
+    rows = conn.execute(
+        text(
+            "SELECT h.holiday_date, h.name, h.day_part,"
+            " array_agg(coalesce(s.outlet_name, s.project_name, s.tenant_id)"
+            "           ORDER BY s.project_name, s.outlet_name) AS scope"
+            " FROM hr.holiday h JOIN hr.holiday_scope s ON s.holiday_id = h.holiday_id"
+            " WHERE h.removed_at IS NULL AND h.status = 'DECLARED' AND h.applies_to = 'SELECTED'"
+            " AND h.holiday_date >= :a AND h.holiday_date <= :b"
+            " GROUP BY h.holiday_id, h.holiday_date, h.name, h.day_part ORDER BY h.holiday_date"
+        ),
+        {"a": first, "b": last},
+    )
+    return [
+        {"date": d.isoformat(), "name": n, "dayPart": p, "appliesTo": [str(x) for x in scope]}
+        for d, n, p, scope in rows
+    ]
 
 
 @router.get("/attendance/employee/{employee_id}")

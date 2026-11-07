@@ -8,7 +8,8 @@ half day. The Project Managers of the person's project are told by email; they a
 Team Lead decides.
 
 Not a short day: a Sunday or declared holiday (that is off-day work, approved on its own), and a
-day with approved half-day leave. A person who never checks out raises nothing here: HR sees that
+day with approved half-day leave. On a half-day holiday (7 Nov 2026) the minimum is halved and only
+the time inside the working half counts. A person who never checks out raises nothing here: HR sees that
 day as "Checked in, never checked out"."""
 
 from __future__ import annotations
@@ -31,7 +32,12 @@ NOTICE_TEMPLATE = "SHORT_DAY_PM"
 
 
 def minimum(values: dict[str, Any]) -> timedelta:
-    return timedelta(hours=int(values["attendance.min_work_hours"]))
+    """`values` are the day's settings: on a half-day holiday min_work_hours is already halved."""
+    return timedelta(hours=float(values["attendance.min_work_hours"]))
+
+
+def hours_text(values: dict[str, Any]) -> str:
+    return f"{float(values['attendance.min_work_hours']):g}"
 
 
 def on_half_day_leave(conn: Connection, employee_id: str, day: date) -> bool:
@@ -68,14 +74,19 @@ class ShortDayNotice:
     work_date: date
     check_in_at: datetime
     check_out_at: datetime
-    minimum_hours: int
+    minimum_hours: float
     reason: str | None
     pm_user_ids: tuple[str, ...]
     company: str
     sign_in_link: str
+    # On a half-day holiday: the time inside the working half, and what the day was.
+    worked_in_half: timedelta | None = None
+    half_day: str | None = None
 
     @property
     def worked(self) -> timedelta:
+        if self.worked_in_half is not None:
+            return self.worked_in_half
         return self.check_out_at - self.check_in_at
 
     def subject(self) -> str:
@@ -85,14 +96,26 @@ class ShortDayNotice:
         )
 
     def body(self, pm_name: str | None) -> str:
+        times = (
+            f"(check-in {to_ist(self.check_in_at):%H:%M}, check-out "
+            f"{to_ist(self.check_out_at):%H:%M} IST)"
+        )
+        if self.half_day:
+            summary = (
+                f"{self.employee_name} ({self.employee_code}) worked {duration_text(self.worked)}"
+                f" of the working half on {self.work_date:%d %b %Y}, a half-day holiday"
+                f" ({self.half_day}) {times}, less than the {self.minimum_hours:g} hours required."
+            )
+        else:
+            summary = (
+                f"{self.employee_name} ({self.employee_code}) was checked in for "
+                f"{duration_text(self.worked)} on {self.work_date:%d %b %Y} {times}, less than"
+                f" the {self.minimum_hours:g} hours required."
+            )
         lines = [
             f"Dear {pm_name or 'there'},",
             "",
-            f"{self.employee_name} ({self.employee_code}) was checked in for "
-            f"{duration_text(self.worked)} on {self.work_date:%d %b %Y} "
-            f"(check-in {to_ist(self.check_in_at):%H:%M}, check-out "
-            f"{to_ist(self.check_out_at):%H:%M} IST), less than the {self.minimum_hours} hours "
-            "required.",
+            summary,
             "",
             f"Reason given: {self.reason or '(none)'}",
             "",
@@ -117,6 +140,8 @@ def build_notice(
     reason: str | None,
     pm_user_ids: set[str],
     values: dict[str, Any],
+    worked_in_half: timedelta | None = None,
+    half_day: str | None = None,
 ) -> ShortDayNotice | None:
     if not pm_user_ids:
         return None
@@ -134,11 +159,13 @@ def build_notice(
         work_date=work_date,
         check_in_at=check_in_at,
         check_out_at=check_out_at,
-        minimum_hours=int(values["attendance.min_work_hours"]),
+        minimum_hours=float(values["attendance.min_work_hours"]),
         reason=(reason or "").strip() or None,
         pm_user_ids=tuple(sorted(pm_user_ids)),
         company=str(values.get("company.name") or "").strip() or "Verigence",
         sign_in_link=str(values.get("email.sign_in_url") or ""),
+        worked_in_half=worked_in_half,
+        half_day=half_day,
     )
 
 

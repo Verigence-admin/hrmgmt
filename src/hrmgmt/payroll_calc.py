@@ -146,7 +146,8 @@ def validate_statutory(config: dict[str, Any]) -> dict[str, Any]:
 @dataclass(frozen=True)
 class Days:
     in_month: int
-    working_days: int
+    # Decimal: a half-day holiday counts 0.5 (7 Nov 2026).
+    working_days: Decimal | int
     present_days: Decimal
     paid_leave_days: Decimal
     unpaid_leave_days: Decimal
@@ -180,6 +181,12 @@ class Days:
             - self.unpaid_leave_days
         )
         return max(value, ZERO)
+
+
+def _days_number(value: Decimal | int) -> int | float:
+    """Whole days stay a whole number in the figures; 24.5 stays 24.5."""
+    number = Decimal(value)
+    return int(number) if number == number.to_integral_value() else float(number)
 
 
 def compute_line(
@@ -305,7 +312,7 @@ def compute_line(
     return {
         "days": {
             "inMonth": days.in_month,
-            "workingDays": days.working_days,
+            "workingDays": _days_number(days.working_days),
             "presentDays": str(days.present_days),
             "paidLeaveDays": str(days.paid_leave_days),
             "unpaidLeaveDays": str(days.unpaid_leave_days),

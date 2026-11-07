@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Connection, text
 
+from hrmgmt import holidays as hol
 from hrmgmt import leave_rules as lr
 from hrmgmt import permissions as perm
 from hrmgmt.api.attendance import get_clock
@@ -170,11 +171,12 @@ def unexplained_absences(conn: Connection, employee_id: str, now: datetime) -> l
         while d <= b:
             on_leave.add(d)
             d += timedelta(days=1)
-    holidays = lr.declared_holidays(conn, start, end)
+    # A half-day holiday still has a working half: with no check-in and no leave it is unexplained.
+    holidays = hol.holidays_for(conn, employee_id, start, end)
     out = []
     d = start
     while d <= end:
-        if d.weekday() != 6 and d not in holidays and d not in present and d not in on_leave:
+        if not hol.is_off_day(d, holidays.get(d)) and d not in present and d not in on_leave:
             out.append(d)
         d += timedelta(days=1)
     return out
@@ -200,7 +202,7 @@ def apply_leave(
         )
     if body.to_date > today + timedelta(days=_ADVANCE_DAYS):
         raise ApiError(422, "LEAVE_DATES_INVALID", "That is too far ahead.")
-    days = lr.leave_days(conn, body.from_date, body.to_date, body.half_day)
+    days = lr.leave_days(conn, body.from_date, body.to_date, body.half_day, employee_id)
     occasion = (body.occasion or "").strip() or None
     if body.leave_type == "SPECIAL" and not occasion:
         raise ApiError(422, "LEAVE_OCCASION_REQUIRED", "Say what the special occasion is.")
@@ -413,11 +415,11 @@ def cover_warnings(
         ),
         {"u": str(user_id), "n": now},
     ).all()
-    holidays = lr.declared_holidays(conn, start, end)
+    holidays = hol.holidays_for(conn, employee_id, start, end)
     days = []
     d = start
     while d <= end:
-        if d.weekday() != 6 and d not in holidays:
+        if not hol.is_off_day(d, holidays.get(d)):
             days.append(d)
         d += timedelta(days=1)
     out = []

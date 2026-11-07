@@ -920,7 +920,7 @@ def set_inputs(
             statutory,
             body.extra_lop_days,
             adjustments,
-            pdata.declared_holidays(conn, run["pay_month"]),
+            pdata.holidays_of(conn, eid, run["pay_month"]),
         )
     except pcalc.PayrollError as exc:
         raise ApiError(422, "PAYROLL_LINE_INVALID", str(exc)) from exc

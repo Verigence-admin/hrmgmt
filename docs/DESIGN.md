@@ -196,6 +196,18 @@ Each phase is deployed and checked on DEV before the next starts.
   The calendar carries a status per date (tentative or declared); only declared holidays count as
   non-working days, and the screens say "Tentative. Final holidays are declared by HR" until HR
   declares them.
+- **Half-day and scoped holidays (product owner, 7 Nov 2026).** HR or SuperAdmin adds a holiday as a
+  full day or a half day (morning off or afternoon off), for the whole company or for chosen
+  projects and outlets. Which holiday applies to a person on a date is decided once, in
+  `hrmgmt/holidays.py`, from their work assignments valid that day; a full day wins, and a morning
+  plus an afternoon make a full day. On a half-day holiday the other half is a working day: with
+  the morning off it starts at `attendance.half_day_split` (14:00) and late is judged from there;
+  with the afternoon off the earliest check-out and the absence time are the split. Minimum hours
+  are halved. At least half the minimum hours worked inside the off half goes to the Team Lead as
+  off-day work and earns half a comp-off day. A half-day holiday counts 0.5 in leave and payroll
+  working days; half-day leave on it is refused (apply for a full day, which counts 0.5). An
+  attended half-day holiday counts one attendance day towards earned paid leave. A removed holiday
+  keeps its row; every add, change and removal is audited with before and after.
 
 ## 16. The HR module must not affect Audit Core (rules, 3 October 2026)
 

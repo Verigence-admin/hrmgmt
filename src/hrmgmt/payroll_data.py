@@ -11,41 +11,49 @@ from typing import Any
 from sqlalchemy import Connection, text
 
 from hrmgmt import attendance_grace as grace
+from hrmgmt import holidays as hol
 from hrmgmt import payroll_calc as pcalc
 from hrmgmt.attendance_correction import approved_values
 from hrmgmt.claim_rules import add_months
-from hrmgmt.timeutil import is_sunday
 
 
 def month_end(month: date) -> date:
     return add_months(month, 1) - timedelta(days=1)
 
 
-def declared_holidays(conn: Connection, month: date) -> set[date]:
-    return {
-        r[0]
+Holidays = dict[date, hol.DayHoliday]
+
+
+def declared_holidays(conn: Connection, month: date) -> dict[str, Holidays]:
+    """employee -> the declared holidays of the month that apply to them (hrmgmt.holidays), for
+    every active employee. One read for the whole run."""
+    ids = [
+        str(r[0])
         for r in conn.execute(
-            text(
-                "SELECT holiday_date FROM hr.holiday WHERE status = 'DECLARED' AND holiday_date BETWEEN :a AND :b"
-            ),
-            {"a": month, "b": month_end(month)},
+            text("SELECT employee_id FROM hr.employee WHERE employment_status = 'ACTIVE'")
         )
-    }
+    ]
+    return hol.holidays_by_employee(conn, ids, month, month_end(month))
 
 
-def working_days(month: date, holidays: set[date]) -> int:
-    day, count = month, 0
+def holidays_of(conn: Connection, employee_id: str, month: date) -> Holidays:
+    return hol.holidays_for(conn, employee_id, month, month_end(month))
+
+
+def working_days(month: date, holidays: Holidays) -> Decimal:
+    """Days of the month that are working days: a half-day holiday counts 0.5."""
+    day, count = month, Decimal(0)
     while day <= month_end(month):
-        if not is_sunday(day) and day not in holidays:
-            count += 1
+        count += hol.working_fraction(day, holidays.get(day))
         day += timedelta(days=1)
     return count
 
 
 def leave_days_in_month(
-    conn: Connection, employee_id: str, month: date, holidays: set[date]
+    conn: Connection, employee_id: str, month: date, holidays: Holidays
 ) -> tuple[Decimal, Decimal]:
-    """Approved paid and unpaid leave days that fall in the month (Sundays and holidays excluded)."""
+    """Approved paid and unpaid leave days that fall in the month (Sundays and holidays excluded;
+    on a half-day holiday a day of leave counts at most 0.5)."""
     paid = Decimal(0)
     unpaid = Decimal(0)
     end = month_end(month)
@@ -59,8 +67,9 @@ def leave_days_in_month(
     for leave_type, start, finish, half in rows:
         day = max(start, month)
         while day <= min(finish, end):
-            if not is_sunday(day) and day not in holidays:
-                amount = Decimal("0.5") if half else Decimal(1)
+            share = hol.working_fraction(day, holidays.get(day))
+            if share > 0:
+                amount = min(Decimal("0.5") if half else Decimal(1), share)
                 if leave_type == "UNPAID":
                     unpaid += amount
                 else:
@@ -69,9 +78,12 @@ def leave_days_in_month(
     return paid, unpaid
 
 
-def present_days(conn: Connection, employee_id: str, month: date) -> Decimal:
+def present_days(
+    conn: Connection, employee_id: str, month: date, holidays: Holidays | None = None
+) -> Decimal:
     """Days with a check-in, except where an approved attendance correction says what the day
-    counts (1 or 0.5); a corrected day with no check-in counts too."""
+    counts (1 or 0.5); a corrected day with no check-in counts too. On a half-day holiday the day
+    counts at most 0.5, the working half, so present days never exceed working days."""
     corrected = approved_values(conn, employee_id, month, month_end(month))
     checked_in = {
         r[0]
@@ -83,7 +95,15 @@ def present_days(conn: Connection, employee_id: str, month: date) -> Decimal:
             {"e": employee_id, "a": month, "b": month_end(month)},
         )
     }
-    return Decimal(len(checked_in - corrected.keys())) + sum(corrected.values(), Decimal(0))
+    holidays = holidays or {}
+
+    def cap(day: date, value: Decimal) -> Decimal:
+        h = holidays.get(day)
+        return min(value, Decimal("0.5")) if hol.half_day(day, h) is not None else value
+
+    return sum((cap(d, Decimal(1)) for d in checked_in - corrected.keys()), Decimal(0)) + sum(
+        (cap(d, v) for d, v in corrected.items()), Decimal(0)
+    )
 
 
 def structure_for(conn: Connection, employee_id: str, month: date) -> Any:
@@ -129,8 +149,9 @@ def build_line(
     statutory: dict[str, Any],
     extra_lop: Decimal,
     adjustments: list[dict[str, Any]],
-    holidays: set[date],
+    holidays: Holidays,
 ) -> tuple[Any, dict[str, Any]]:
+    """`holidays`: the declared holidays of the month that apply to this employee."""
     """Returns (the salary structure used, the worked-out figures). Raises PayrollError."""
     structure = structure_for(conn, str(employee["employee_id"]), month)
     if structure is None:
@@ -147,7 +168,7 @@ def build_line(
     days = pcalc.Days(
         in_month=pcalc.days_in_month(month),
         working_days=working_days(month, holidays),
-        present_days=present_days(conn, str(employee["employee_id"]), month),
+        present_days=present_days(conn, str(employee["employee_id"]), month, holidays),
         paid_leave_days=paid_leave,
         unpaid_leave_days=unpaid_leave,
         extra_lop_days=extra_lop,
@@ -176,7 +197,7 @@ def prepare_lines(
     """(Re)builds every line of a draft run. HR's own inputs (extra loss of pay, adjustments) are
     kept. Returns (people left out with the reason, number of lines written)."""
     keep = keep or {}
-    holidays = declared_holidays(conn, month)
+    by_employee = declared_holidays(conn, month)
     employees = (
         conn.execute(
             text(
@@ -197,6 +218,9 @@ def prepare_lines(
         eid = str(e["employee_id"])
         extra, adjustments = keep.get(eid, (Decimal(0), []))
         try:
+            holidays = by_employee.get(eid)
+            if holidays is None:
+                holidays = holidays_of(conn, eid, month)
             structure, figures = build_line(conn, e, month, statutory, extra, adjustments, holidays)
         except pcalc.PayrollError as exc:
             skipped.append(
