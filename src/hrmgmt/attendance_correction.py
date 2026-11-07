@@ -11,7 +11,7 @@ check-out, the photos and the exceptions stay as they were, so the history shows
 what was agreed.
 
 What can be corrected: a past working day (not a Sunday, a declared holiday or a day of approved
-full-day leave), on or after joining, in the current or the previous month, before that month's
+full-day leave), on or after joining, in the current calendar month (product owner 7 Nov 2026), before that month's
 payroll has gone past draft, and only when the day does not already count in full (no check-in,
 no check-out, or a rejected exception). One pending or approved correction per day."""
 

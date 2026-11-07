@@ -121,6 +121,10 @@ def test_what_cannot_be_corrected(world):
     assert code(ask(world, pc, "2026-10-09")) == (422, "ATTENDANCE_CORRECTION_NOT_ALLOWED")  # today
     assert code(ask(world, pc, "2026-10-04"))[1] == "ATTENDANCE_CORRECTION_NOT_ALLOWED"  # Sunday
     assert code(ask(world, pc, "2026-08-29"))[1] == "ATTENDANCE_CORRECTION_NOT_ALLOWED"  # too old
+    # Product owner (7 Nov 2026): a day of the previous calendar month cannot be raised any more.
+    last_month = ask(world, pc, "2026-09-30")
+    assert code(last_month)[1] == "ATTENDANCE_CORRECTION_NOT_ALLOWED"
+    assert "October 2026" in last_month.json()["detail"]
     # a complete, clean day already counts in full
     world.clock.set(ist(2026, 10, 6, 10, 20))
     send(world, pc, "in", token(world, pc))

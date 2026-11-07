@@ -39,9 +39,8 @@ def _invalid(message: str) -> ApiError:
     return ApiError(422, "ATTENDANCE_CORRECTION_NOT_ALLOWED", message)
 
 
-def _previous_month_start(today: date) -> date:
-    first = today.replace(day=1)
-    return date(first.year - (first.month == 1), (first.month - 2) % 12 + 1, 1)
+def _month_start(today: date) -> date:
+    return today.replace(day=1)
 
 
 def _check_day(
@@ -51,8 +50,12 @@ def _check_day(
     corrected once it is past 17:00 and the system has marked it absent."""
     if day > today or (day == today and not closed_today):
         raise _invalid("Only a past day can be corrected. Today, check in or check out instead.")
-    if day < _previous_month_start(today):
-        raise _invalid("Only days in this month or last month can be corrected.")
+    # Product owner (7 Nov 2026): a correction can be raised only for a day of the current calendar
+    # month; a day of an earlier month cannot be raised any more.
+    if day < _month_start(today):
+        raise _invalid(
+            f"Only days in {today:%B %Y} can be corrected. A day of an earlier month cannot be raised."
+        )
     kind, holiday = day_kind(conn, day, employee_id)
     if kind == "SUNDAY":
         raise _invalid("A Sunday is not a working day. Work on a day off is approved separately.")
