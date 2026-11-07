@@ -14,7 +14,10 @@ a half-day holiday earns half a comp-off day. A half-day holiday whose working h
 counts as half an attendance day (7 Nov 2026): halves add up as halves towards the 22. A Sunday
 made a working day for the person counts like any working day.
 
-Special occasion leave has its own yearly quota (`leave.special_days_per_year`)."""
+Special occasion leave is birthday leave (product owner, 7 Nov 2026). Each birthday opens
+`leave.special_days_per_year` days, usable from the birthday up to the day before the next one; it
+never carries over and cannot be taken before the birthday that opens it. Its ledger rows carry the
+year of that birthday in leave_year (a 29 Feb birthday is 28 Feb in other years)."""
 
 from __future__ import annotations
 
@@ -78,19 +81,118 @@ def _days(start: date, end: date) -> list[date]:
     return [start + timedelta(days=i) for i in range((end - start).days + 1)]
 
 
+# ---- birthday leave (SPECIAL) -----------------------------------------------------------------
+
+BIRTHDAY = "Birthday"
+# Note prefix of the quota correction entries written by migration 0027.
+QUOTA_CORRECTION = "Quota correction"
+NO_DATE_OF_BIRTH = "Your date of birth is not in myHR; ask HR to add it."
+
+
+def birthday_in(dob: date, year: int) -> date:
+    """The birthday in a given year; 29 Feb falls on 28 Feb in a year that has none."""
+    try:
+        return date(year, dob.month, dob.day)
+    except ValueError:
+        return date(year, 2, 28)
+
+
+def birthday_window(dob: date, day: date) -> tuple[int, date, date]:
+    """(year of the birthday that opened it, first day, last day) of the birthday leave a date
+    falls in: from a birthday to the day before the next one."""
+    year = day.year if day >= birthday_in(dob, day.year) else day.year - 1
+    return year, birthday_in(dob, year), birthday_in(dob, year + 1) - timedelta(days=1)
+
+
+def first_open_year(dob: date, joined: date | None) -> int | None:
+    """The year of the first birthday on or after joining: earlier birthdays open nothing for this
+    person (product owner, 7 Nov 2026). None: no joining date, every birthday counts."""
+    if joined is None:
+        return None
+    return joined.year if birthday_in(dob, joined.year) >= joined else joined.year + 1
+
+
+def window_exists(dob: date, joined: date | None, year: int) -> bool:
+    first = first_open_year(dob, joined)
+    return first is None or year >= first
+
+
+def date_of_joining(conn: Connection, employee_id: str) -> date | None:
+    value = conn.execute(
+        text("SELECT date_of_joining FROM hr.employee WHERE employee_id = CAST(:e AS uuid)"),
+        {"e": employee_id},
+    ).scalar()
+    return value if isinstance(value, date) else None
+
+
+def date_of_birth(conn: Connection, employee_id: str) -> date | None:
+    value = conn.execute(
+        text("SELECT date_of_birth FROM hr.employee WHERE employee_id = CAST(:e AS uuid)"),
+        {"e": employee_id},
+    ).scalar()
+    return value if isinstance(value, date) else None
+
+
+def _special_refused(code: str, detail: str) -> ApiError:
+    return ApiError(422, code, detail)
+
+
+def special_window(conn: Connection, employee_id: str, start: date, end: date) -> int:
+    """The birthday year whose leave these dates use. Refused with a plain message when there is
+    no date of birth, or when the dates run across a birthday (the next leave opens on it)."""
+    dob = date_of_birth(conn, employee_id)
+    if dob is None:
+        raise _special_refused("LEAVE_NO_DATE_OF_BIRTH", NO_DATE_OF_BIRTH)
+    year, _, last = birthday_window(dob, start)
+    joined = date_of_joining(conn, employee_id)
+    if not window_exists(dob, joined, year):
+        first = first_open_year(dob, joined)
+        assert first is not None
+        raise _special_refused(
+            "LEAVE_BIRTHDAY_NOT_OPEN",
+            f"Birthday leave opens on your birthday, {birthday_in(dob, first):%d %b %Y}, the first"
+            " birthday after you joined.",
+        )
+    if end > last:
+        opens = last + timedelta(days=1)
+        raise _special_refused(
+            "LEAVE_BIRTHDAY_NOT_OPEN",
+            f"Birthday leave opens on your birthday, {opens:%d %b %Y}. These dates run across it:"
+            " apply for the days before it and from it separately.",
+        )
+    return year
+
+
+def special_used_message(dob: date, year: int) -> str:
+    _, opened, last = birthday_window(dob, birthday_in(dob, year))
+    return (
+        f"Your birthday leave for the birthday of {opened:%d %b %Y} has been used or is waiting for"
+        f" approval. Birthday leave opens on your birthday, {last + timedelta(days=1):%d %b %Y}."
+    )
+
+
 def ensure_grants(conn: Connection, employee_id: str, year: int) -> None:
-    """The year's Special occasion quota is granted the first time it is needed. A unique index
-    makes a second grant impossible even if two requests arrive together."""
+    """The birthday leave of the birthday in `year` is granted the first time it is needed (no
+    grant without a date of birth). A unique index makes a second grant impossible even if two
+    requests arrive together."""
     days = Decimal(str(cfg.load_all(conn)["leave.special_days_per_year"]))
-    if days <= 0:
+    dob = date_of_birth(conn, employee_id)
+    if days <= 0 or dob is None:
         return
+    if not window_exists(dob, date_of_joining(conn, employee_id), year):
+        return  # a birthday before joining opens nothing
     conn.execute(
         text(
             "INSERT INTO hr.leave_ledger (employee_id, leave_type, leave_year, entry_type, days, note)"
-            " VALUES (CAST(:e AS uuid), 'SPECIAL', :y, 'GRANT', :d, 'Yearly special occasion quota')"
+            " VALUES (CAST(:e AS uuid), 'SPECIAL', :y, 'GRANT', :d, :n)"
             " ON CONFLICT DO NOTHING"
         ),
-        {"e": employee_id, "y": year, "d": days},
+        {
+            "e": employee_id,
+            "y": year,
+            "d": days,
+            "n": f"Birthday leave for the birthday of {birthday_in(dob, year):%d %b %Y}",
+        },
     )
 
 
@@ -322,13 +424,36 @@ def progress(conn: Connection, employee_id: str, today: date) -> dict[str, Any]:
 # ---- balances -------------------------------------------------------------------------------
 
 
+def special_year_for(conn: Connection, employee_id: str, day: date) -> int | None:
+    """The birthday year a date's birthday leave belongs to (None: no date of birth, or that
+    birthday came before joining, so there is no birthday leave for that date)."""
+    dob = date_of_birth(conn, employee_id)
+    if dob is None:
+        return None
+    year = birthday_window(dob, day)[0]
+    return year if window_exists(dob, date_of_joining(conn, employee_id), year) else None
+
+
 def balances(
-    conn: Connection, employee_id: str, year: int, today: date | None = None
+    conn: Connection,
+    employee_id: str,
+    year: int,
+    today: date | None = None,
+    *,
+    special_on: date | None = None,
 ) -> dict[str, dict[str, Decimal]]:
-    """PAID and COMP_OFF: everything earned and used so far. SPECIAL: the given year's quota."""
+    """PAID and COMP_OFF: everything earned and used so far. SPECIAL: the birthday leave of the
+    birthday window holding `special_on` (else today; else the birthday year `year`). No date of
+    birth: nothing."""
     if today is not None:
         accrue(conn, employee_id, today)
-    ensure_grants(conn, employee_id, year)
+    on = special_on or today
+    special = special_year_for(conn, employee_id, on) if on is not None else year
+    if special is not None:
+        ensure_grants(conn, employee_id, special)
+    dob = date_of_birth(conn, employee_id)
+    window = birthday_window(dob, birthday_in(dob, special)) if dob and special else None
+    year = special if special is not None else -1
     out: dict[str, dict[str, Decimal]] = {
         t: {"granted": _ZERO, "used": _ZERO, "pending": _ZERO, "balance": _ZERO} for t in PAID
     }
@@ -338,11 +463,14 @@ def balances(
             " WHERE employee_id = CAST(:e AS uuid) AND leave_type IN ('PAID', 'COMP_OFF')"
             " GROUP BY leave_type, entry_type"
             " UNION ALL"
-            " SELECT leave_type, entry_type, sum(days) FROM hr.leave_ledger"
-            " WHERE employee_id = CAST(:e AS uuid) AND leave_type = 'SPECIAL' AND leave_year = :y"
-            " GROUP BY leave_type, entry_type"
+            # A quota correction (migration 0027) lowers what was granted; it is not leave used.
+            " SELECT leave_type, entry_type, sum(days) FROM ("
+            "   SELECT leave_type, days, CASE WHEN entry_type = 'ADJUST' AND note LIKE :qc"
+            "   THEN 'GRANT' ELSE entry_type END AS entry_type FROM hr.leave_ledger"
+            "   WHERE employee_id = CAST(:e AS uuid) AND leave_type = 'SPECIAL' AND leave_year = :y"
+            " ) s GROUP BY leave_type, entry_type"
         ),
-        {"e": employee_id, "y": year},
+        {"e": employee_id, "y": year, "qc": QUOTA_CORRECTION + "%"},
     ):
         bucket = out[r[0]]
         total = Decimal(r[2])
@@ -358,10 +486,15 @@ def balances(
             " GROUP BY leave_type"
             " UNION ALL"
             " SELECT leave_type, sum(days) FROM hr.leave_request WHERE employee_id = CAST(:e AS uuid)"
-            " AND status = 'PENDING' AND leave_type = 'SPECIAL' AND EXTRACT(year FROM from_date) = :y"
+            " AND status = 'PENDING' AND leave_type = 'SPECIAL' AND from_date >= :a AND from_date <= :b"
             " GROUP BY leave_type"
         ),
-        {"e": employee_id, "y": year},
+        {
+            "e": employee_id,
+            "y": year,
+            "a": window[1] if window else date.max,
+            "b": window[2] if window else date.min,
+        },
     ):
         out[r[0]]["pending"] = Decimal(r[1])
     return out
@@ -374,12 +507,13 @@ RECENT_WINDOW_DAYS = 42
 PAID_TAKEN = ("PAID", "SPECIAL", "COMP_OFF", "SICK", "EARNED")
 
 
-def recent_leave(conn: Connection, employee_id: str, before: date) -> dict[str, Any]:
-    """Approved paid and unpaid leave days in the 6 weeks (42 days) before `before` (a request's
-    from date), counted like any leave day: Sundays and the person's holidays left out, a half day
-    0.5, a day on a half-day holiday at most 0.5. Only the days inside the window count."""
-    start = before - timedelta(days=RECENT_WINDOW_DAYS)
-    end = before - timedelta(days=1)
+def recent_leave(conn: Connection, employee_id: str, before: date, today: date) -> dict[str, Any]:
+    """Approved paid and unpaid leave days already taken in the 6 weeks (42 days) ending the day
+    before `before` (a request's from date) or yesterday, whichever is earlier, so approved future
+    leave is not counted as taken. Counted like any leave day: Sundays and the person's holidays
+    left out, a half day 0.5, a day on a half-day holiday at most 0.5. Only days inside count."""
+    end = min(before, today) - timedelta(days=1)
+    start = end - timedelta(days=RECENT_WINDOW_DAYS - 1)
     holidays = hol.holidays_for(conn, employee_id, start, end)
     paid = unpaid = _ZERO
     for leave_type, first, last, half in conn.execute(
@@ -403,4 +537,32 @@ def recent_leave(conn: Connection, employee_id: str, before: date) -> dict[str, 
         "windowTo": end.isoformat(),
         "paidDays": float(paid),
         "unpaidDays": float(unpaid),
+    }
+
+
+def special_info(conn: Connection, employee_id: str, today: date) -> dict[str, Any]:
+    """For the balance cards: the birthday leave window holding today, and when the next opens."""
+    dob = date_of_birth(conn, employee_id)
+    if dob is None:
+        return {"dateOfBirthOnFile": False, "message": NO_DATE_OF_BIRTH}
+    year, first, last = birthday_window(dob, today)
+    opens = first_open_year(dob, date_of_joining(conn, employee_id))
+    if opens is not None and year < opens:
+        # Joined after this window's birthday: nothing until the first birthday after joining.
+        first = birthday_in(dob, opens)
+        return {
+            "dateOfBirthOnFile": True,
+            "open": False,
+            "birthdayYear": opens,
+            "availableFrom": first.isoformat(),
+            "availableUntil": birthday_window(dob, first)[2].isoformat(),
+            "nextOpensOn": first.isoformat(),
+        }
+    return {
+        "dateOfBirthOnFile": True,
+        "open": True,
+        "birthdayYear": year,
+        "availableFrom": first.isoformat(),
+        "availableUntil": last.isoformat(),
+        "nextOpensOn": (last + timedelta(days=1)).isoformat(),
     }

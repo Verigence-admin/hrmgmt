@@ -29,7 +29,7 @@ can_review = require_permission(perm.HR_LEAVE_REVIEW)
 LeaveType = Literal["PAID", "SPECIAL", "COMP_OFF", "UNPAID"]
 _BACKDATE_DAYS = 30
 _ADVANCE_DAYS = 365
-_LABELS = {"PAID": "paid leave", "SPECIAL": "special occasion leave", "COMP_OFF": "comp-off"}
+_LABELS = {"PAID": "paid leave", "SPECIAL": "birthday leave", "COMP_OFF": "comp-off"}
 
 
 class LeaveApply(BaseModel):
@@ -39,7 +39,8 @@ class LeaveApply(BaseModel):
     to_date: date
     half_day: bool = False
     reason: str | None = Field(default=None, max_length=500)
-    # What the Special occasion is (own marriage, a death in the family...). Required for SPECIAL.
+    # Special occasion leave is birthday leave (7 Nov 2026): the server records "Birthday" and
+    # ignores what is sent here. Kept so earlier app versions, which still send it, are accepted.
     occasion: str | None = Field(default=None, max_length=100)
 
 
@@ -69,6 +70,8 @@ def _balance_view(conn: Connection, employee_id: str, year: int, today: date) ->
     b = lr.balances(conn, employee_id, year, today)
     return {
         "year": year,
+        # SPECIAL is birthday leave: its figures are for the birthday window holding today.
+        "birthdayLeave": lr.special_info(conn, employee_id, today),
         "types": [
             {
                 "leaveType": t,
@@ -203,9 +206,13 @@ def apply_leave(
     if body.to_date > today + timedelta(days=_ADVANCE_DAYS):
         raise ApiError(422, "LEAVE_DATES_INVALID", "That is too far ahead.")
     days = lr.leave_days(conn, body.from_date, body.to_date, body.half_day, employee_id)
-    occasion = (body.occasion or "").strip() or None
-    if body.leave_type == "SPECIAL" and not occasion:
-        raise ApiError(422, "LEAVE_OCCASION_REQUIRED", "Say what the special occasion is.")
+    occasion = None
+    special_year: int | None = None
+    if body.leave_type == "SPECIAL":
+        # Birthday leave only (product owner, 7 Nov 2026): from the birthday to the day before the
+        # next one, never before it.
+        occasion = lr.BIRTHDAY
+        special_year = lr.special_window(conn, employee_id, body.from_date, body.to_date)
 
     # One request at a time per person, so two quick submissions cannot both pass the checks.
     conn.execute(
@@ -222,8 +229,14 @@ def apply_leave(
     if clash:
         raise conflict("LEAVE_OVERLAPS", "You already have leave on some of these dates.")
     if body.leave_type in lr.PAID:
-        info = lr.balances(conn, employee_id, body.from_date.year, today)[body.leave_type]
+        info = lr.balances(
+            conn, employee_id, body.from_date.year, today, special_on=body.from_date
+        )[body.leave_type]
         available = info["balance"] - info["pending"]
+        if days > available and special_year is not None:
+            dob = lr.date_of_birth(conn, employee_id)
+            assert dob is not None
+            raise conflict("LEAVE_BALANCE_TOO_LOW", lr.special_used_message(dob, special_year))
         if days > available:
             raise conflict(
                 "LEAVE_BALANCE_TOO_LOW",
@@ -261,7 +274,13 @@ def apply_leave(
     )
     if status == "APPROVED" and body.leave_type in lr.PAID:
         _deduct(
-            conn, employee_id, body.leave_type, body.from_date.year, days, request_id, user.user_id
+            conn,
+            employee_id,
+            body.leave_type,
+            special_year if special_year is not None else body.from_date.year,
+            days,
+            request_id,
+            user.user_id,
         )
     record_audit(
         conn,
@@ -285,18 +304,22 @@ def apply_leave(
         .mappings()
         .one()
     )
-    return {**_view(row), "recentLeave": lr.recent_leave(conn, employee_id, body.from_date)}
+    return {
+        **_view(row),
+        "recentLeave": lr.recent_leave(conn, employee_id, body.from_date, today),
+    }
 
 
 @router.get("/leave/recent")
 def my_recent_leave(
     from_date: Annotated[date, Query(alias="fromDate")],
     user: HumanPrincipal = Depends(current_user),
+    clock: Clock = Depends(get_clock),
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     """While applying: paid and unpaid leave days approved in the 6 weeks before the chosen from
     date (product owner, 7 Nov 2026). The approver sees the same numbers with the request."""
-    return lr.recent_leave(conn, _own_employee_id(conn, user), from_date)
+    return lr.recent_leave(conn, _own_employee_id(conn, user), from_date, ist_date(clock()))
 
 
 def _deduct(
@@ -395,13 +418,15 @@ def leave_approvals(
             if status == "PENDING":
                 eid = str(r["employee_id"])
                 if r["leave_type"] in lr.PAID:
-                    b = lr.balances(conn, eid, r["from_date"].year, today)[r["leave_type"]]
+                    b = lr.balances(
+                        conn, eid, r["from_date"].year, today, special_on=r["from_date"]
+                    )[r["leave_type"]]
                     item["balanceAvailable"] = _num(b["balance"])
                 item["coverWarnings"] = cover_warnings(
                     conn, eid, r["from_date"], r["to_date"], r["half_day"], now
                 )
                 # Leave taken in the 6 weeks before this request's from date (7 Nov 2026).
-                item["recentLeave"] = lr.recent_leave(conn, eid, r["from_date"])
+                item["recentLeave"] = lr.recent_leave(conn, eid, r["from_date"], today)
             items.append(item)
     return {"items": items}
 
@@ -514,7 +539,17 @@ def decide_leave(
     status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
     if status == "APPROVED" and row["leave_type"] in lr.PAID:
         year = row["from_date"].year
-        balance = lr.balances(conn, employee_id, year, ist_date(now))[row["leave_type"]]["balance"]
+        if row["leave_type"] == "SPECIAL":
+            # The birthday rule is checked again: a request raised before it, or a date of birth
+            # changed since, is refused with the same message the employee would get.
+            year = lr.special_window(conn, employee_id, row["from_date"], row["to_date"])
+        balance = lr.balances(conn, employee_id, year, ist_date(now), special_on=row["from_date"])[
+            row["leave_type"]
+        ]["balance"]
+        if row["days"] > balance and row["leave_type"] == "SPECIAL":
+            dob = lr.date_of_birth(conn, employee_id)
+            assert dob is not None
+            raise conflict("LEAVE_BALANCE_TOO_LOW", lr.special_used_message(dob, year))
         if row["days"] > balance:
             raise conflict(
                 "LEAVE_BALANCE_TOO_LOW", "The balance is no longer enough for this leave."
@@ -571,6 +606,14 @@ def reverse_leave(
     if row["status"] != "APPROVED":
         raise conflict("LEAVE_NOT_APPROVED", "Only an approved leave can be reversed.")
     if row["leave_type"] in lr.PAID + lr.LEGACY:
+        # Back to the year the days were taken from (for birthday leave, the birthday's year).
+        taken_year = conn.execute(
+            text(
+                "SELECT leave_year FROM hr.leave_ledger WHERE request_id = CAST(:r AS uuid)"
+                " AND entry_type = 'DEDUCT' ORDER BY created_at LIMIT 1"
+            ),
+            {"r": rid},
+        ).scalar()
         conn.execute(
             text(
                 "INSERT INTO hr.leave_ledger (employee_id, leave_type, leave_year, entry_type, days, request_id, note, created_by)"
@@ -579,7 +622,7 @@ def reverse_leave(
             {
                 "e": str(row["employee_id"]),
                 "t": row["leave_type"],
-                "y": row["from_date"].year,
+                "y": taken_year if taken_year is not None else row["from_date"].year,
                 "d": row["days"],
                 "r": rid,
                 "u": user.user_id,
@@ -689,7 +732,7 @@ def employee_leave(
         "balance": _balance_view(conn, eid, year or today.year, today),
         "earning": lr.progress(conn, eid, today),
         "requests": [
-            {**_view(r), "recentLeave": lr.recent_leave(conn, eid, r["from_date"])}
+            {**_view(r), "recentLeave": lr.recent_leave(conn, eid, r["from_date"], today)}
             if r["status"] == "PENDING"
             else _view(r)
             for r in rows

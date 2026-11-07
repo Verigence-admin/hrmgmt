@@ -21,10 +21,19 @@ def world(migrated_engine):
     return w
 
 
-def person(world: World, role: str | None = "PC", tenant="tenant-a", perms=(), paid=5, **kw):
-    """An employee with `paid` days of paid leave already on file (as an HR adjustment)."""
+def person(
+    world: World,
+    role: str | None = "PC",
+    tenant="tenant-a",
+    perms=(),
+    paid=5,
+    dob: str | None = "1990-08-30",
+    **kw,
+):
+    """An employee with `paid` days of paid leave already on file (as an HR adjustment), born on
+    30 Aug unless said otherwise (birthday leave needs a date of birth)."""
     hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
-    emp, user = world.employee(hr)
+    emp, user = world.employee(hr, **({"date_of_birth": dob} if dob else {}))
     if role:
         world.assign(user, role, tenant=tenant, outlet=OUTLET if role == "PC" else None, **kw)
     if perms:
@@ -65,7 +74,7 @@ def balance(world, user, leave_type="PAID"):
     return next(t for t in b["types"] if t["leaveType"] == leave_type)
 
 
-def test_nobody_starts_with_paid_leave_only_the_special_occasion_quota(world):
+def test_nobody_starts_with_paid_leave_only_the_birthday_leave_quota(world):
     _, user = person(world, paid=0)
     b = world.client.get("/hr/v1/leave/balance", headers=world.headers(user)).json()
     assert b["year"] == 2026

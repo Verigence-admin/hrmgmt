@@ -162,24 +162,23 @@ def test_a_rejected_exception_makes_the_day_half_and_a_waiting_one_pauses_the_co
     assert earning(world, user)["attendanceDaysSoFar"] == 0.5
 
 
-def test_special_occasion_leave_needs_the_occasion_and_has_its_own_yearly_quota(world):
-    _, pc = person(world, "PC", paid=0)
+def test_special_occasion_leave_is_birthday_leave_with_its_own_quota(world):
+    _, pc = person(world, "PC", paid=0)  # born 30 Aug: this window runs 30 Aug 2026 to 29 Aug 2027
     _, tl = person(world, "TL", paid=0)
-    r = apply(world, pc, leave_type="SPECIAL", from_date="2026-12-07")
-    assert r.status_code == 422 and r.json()["code"] == "LEAVE_OCCASION_REQUIRED"
     r = apply(
         world,
         pc,
         leave_type="SPECIAL",
         from_date="2026-12-07",
         to_date="2026-12-08",
-        occasion="Sister's wedding",
+        occasion="Sister's wedding",  # what earlier app versions send is not kept
     )
-    assert r.status_code == 201 and r.json()["occasion"] == "Sister's wedding"
+    assert r.status_code == 201 and r.json()["occasion"] == "Birthday"
     assert r.json()["approverRule"] == "TL_PM"
     assert decide(world, tl, r.json()["requestId"]).json()["status"] == "APPROVED"
-    more = apply(world, pc, leave_type="SPECIAL", from_date="2026-12-09", occasion="x")
+    more = apply(world, pc, leave_type="SPECIAL", from_date="2026-12-09")
     assert more.status_code == 409 and more.json()["code"] == "LEAVE_BALANCE_TOO_LOW"
+    assert "opens on your birthday, 30 Aug 2027" in more.json()["detail"]
     # paid leave is untouched by it
     assert balance(world, pc)["balance"] == 0.0
 
