@@ -3,8 +3,11 @@
 One place decides a day's status, so the employee's own calendar, a lead's view of a person and the
 project-wise weekly view never disagree:
 
-- A Sunday or a declared holiday is a day off (work on it shows, with its hours).
-- No check-in on a working day by `attendance.absent_after` (17:00): the system marks it ABSENT.
+- A Sunday or a declared holiday is a day off (work on it shows, with its hours). Holidays are the
+  person's own: company-wide ones and those of their projects or outlets (hrmgmt.holidays).
+- A half-day holiday is a working day with half of it off; the cell says which half (halfDayHoliday).
+- No check-in on a working day by `attendance.absent_after` (17:00; the split, 14:00, when the
+  afternoon is a holiday): the system marks it ABSENT.
   A past working day with no check-in is absent the same way.
 - Leave: approved leave shows as LEAVE_APPROVED, leave still waiting for the Team Lead or Project
   Manager as LEAVE_APPLIED ("applied, not approved"). Until it is approved the day still counts as
@@ -24,9 +27,10 @@ from typing import Any
 
 from sqlalchemy import Connection, text
 
+from hrmgmt import holidays as hol
 from hrmgmt.attendance_correction import live_by_day
 from hrmgmt.attendance_grace import HALF_DAY_KINDS
-from hrmgmt.timeutil import ist_date, parse_hhmm, to_ist
+from hrmgmt.timeutil import ist_date, parse_hhmm
 
 LABELS = {
     "PRESENT": "Present",
@@ -60,6 +64,7 @@ class Cell:
     status: str = "UPCOMING"
     day_kind: str = "WORKING"
     holiday: str | None = None
+    half_day_holiday: dict[str, Any] | None = None
     check_in_at: datetime | None = None
     check_out_at: datetime | None = None
     minutes: int = 0
@@ -76,6 +81,7 @@ class Cell:
             "label": LABELS.get(self.status, self.status),
             "dayKind": self.day_kind,
             "holiday": self.holiday,
+            "halfDayHoliday": self.half_day_holiday,
             "checkInAt": self.check_in_at.isoformat() if self.check_in_at else None,
             "checkOutAt": self.check_out_at.isoformat() if self.check_out_at else None,
             "minutes": self.minutes,
@@ -100,18 +106,8 @@ def cells(
     if not employee_ids:
         return {}
     today = ist_date(now)
-    closed_today = closed_for_check_in(to_ist(now).time(), values)
     p = {"ids": employee_ids, "a": first, "b": last}
-    holidays = {
-        r[0]: str(r[1])
-        for r in conn.execute(
-            text(
-                "SELECT holiday_date, name FROM hr.holiday WHERE status = 'DECLARED'"
-                " AND holiday_date >= :a AND holiday_date <= :b"
-            ),
-            p,
-        )
-    }
+    by_person = hol.holidays_by_employee(conn, employee_ids, first, last)
     joined = {
         str(r[0]): r[1]
         for r in conn.execute(
@@ -167,13 +163,14 @@ def cells(
     out: dict[str, dict[date, Cell]] = {}
     for eid in employee_ids:
         mine: dict[date, Cell] = {}
+        holidays = by_person.get(eid, {})
         day = first
         while day <= last:
             cell = Cell(day=day)
-            if day.weekday() == 6:
-                cell.day_kind = "SUNDAY"
-            elif day in holidays:
-                cell.day_kind, cell.holiday = "HOLIDAY", holidays[day]
+            cell.day_kind, cell.holiday = hol.day_kind(day, holidays.get(day))
+            half = hol.half_day(day, holidays.get(day))
+            cell.half_day_holiday = hol.half_day_view(half, values)
+            closed_today = hol.closed_for_check_in(now, half.day_part if half else None, values)
             record = records.get((eid, day))
             cell.leave = leave.get((eid, day))
             cell.correction = corrections.get((eid, day))

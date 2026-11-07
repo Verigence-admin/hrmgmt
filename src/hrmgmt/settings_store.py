@@ -39,6 +39,12 @@ SPECS: dict[str, Spec] = {
         label="No check-in by this time: the system marks the day Absent",
         group="Attendance",
     ),
+    "attendance.half_day_split": Spec(
+        "time",
+        "14:00",
+        label="Half-day holiday: the afternoon starts at",
+        group="Attendance",
+    ),
     "attendance.grace_per_month": Spec(
         "int",
         1,

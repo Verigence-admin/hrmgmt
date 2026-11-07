@@ -13,6 +13,7 @@ from typing import Any
 
 from sqlalchemy import Connection, text
 
+from hrmgmt import holidays as hol
 from hrmgmt.attendance_correction import live_by_day
 from hrmgmt.timeutil import IST
 
@@ -88,6 +89,10 @@ class Row:
     has_check_out_photo: bool = False
     delinquencies: list[dict[str, Any]] = field(default_factory=list)
     correction: dict[str, Any] | None = None
+    # The person's own day: their holidays may be for some projects or outlets only, or half a day.
+    day_kind: str = "WORKING"
+    holiday: str | None = None
+    half_day_holiday: dict[str, Any] | None = None
 
     @property
     def hours(self) -> float | None:
@@ -122,9 +127,12 @@ def build_rows(
     project_code: str | None = None,
     employee_id: str | None = None,
     closed_today: bool = False,
+    now: datetime | None = None,
+    values: dict[str, Any] | None = None,
 ) -> list[Row]:
     """closed_today: it is past attendance.absent_after (17:00), so today's missing check-ins are
-    absences marked by the system, not "not checked in yet"."""
+    absences marked by the system, not "not checked in yet". With `now` and `values` given, a person
+    whose afternoon is a holiday today is closed from the half-day split (14:00) instead."""
     window_start, _ = _bounds(first)
     _, window_end = _bounds(last)
     params: dict[str, Any] = {"a": first, "b": last, "e": employee_id}
@@ -190,16 +198,9 @@ def build_rows(
         ).mappings()
     ]
     corrections = live_by_day(conn, first, last)
-    holidays = {
-        r[0]
-        for r in conn.execute(
-            text(
-                "SELECT holiday_date FROM hr.holiday"
-                " WHERE status = 'DECLARED' AND holiday_date >= :a AND holiday_date <= :b"
-            ),
-            params,
-        )
-    }
+    by_person = hol.holidays_by_employee(
+        conn, [str(e["employee_id"]) for e in employees], first, last
+    )
     assignments: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in conn.execute(
         text(
@@ -216,9 +217,11 @@ def build_rows(
     day = first
     while day <= last:
         start, end = _bounds(day)
-        non_working = day.weekday() == 6 or day in holidays
         for emp in employees:
             eid = str(emp["employee_id"])
+            holiday = by_person.get(eid, {}).get(day)
+            non_working = hol.is_off_day(day, holiday)
+            half = hol.half_day(day, holiday)
             joined = emp["date_of_joining"]
             record = days.get((eid, day))
             # Before the joining date there is nothing to expect, but a check-in that was made is
@@ -229,7 +232,10 @@ def build_rows(
                 continue
             on_leave = any(e == eid and f <= day <= t for e, f, t in leave)
             leave_applied = any(e == eid and f <= day <= t for e, f, t in applied)
-            closed = day < today or (day == today and closed_today)
+            closed_now = closed_today
+            if day == today and now is not None and values is not None:
+                closed_now = hol.closed_for_check_in(now, half.day_part if half else None, values)
+            closed = day < today or (day == today and closed_now)
             projects = _projects_on(assignments.get(str(emp["security_user_id"]), []), start, end)
             for project in projects:
                 if project_code and project["projectCode"] != project_code:
@@ -246,6 +252,11 @@ def build_rows(
                     closed=closed,
                     leave_applied=leave_applied,
                 )
+                row.day_kind, row.holiday = hol.day_kind(day, holiday)
+                if half is not None and values is not None:
+                    row.half_day_holiday = hol.half_day_view(half, values)
+                elif half is not None:
+                    row.half_day_holiday = {"name": half.name, "dayPart": half.day_part}
                 _apply_correction(row, corrections.get((eid, day)))
                 rows.append(row)
         day += timedelta(days=1)
@@ -403,6 +414,9 @@ def row_view(row: Row) -> dict[str, Any]:
         "hasCheckInPhoto": row.has_check_in_photo,
         "hasCheckOutPhoto": row.has_check_out_photo,
         "correction": row.correction,
+        "dayKind": row.day_kind,
+        "holiday": row.holiday,
+        "halfDayHoliday": row.half_day_holiday,
         "delinquencies": [
             {
                 "code": d["code"],

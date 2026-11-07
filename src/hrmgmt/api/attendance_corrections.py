@@ -11,11 +11,11 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Connection, text
 
+from hrmgmt import holidays as hol
 from hrmgmt import settings_store as cfg
 from hrmgmt.api.attendance import day_kind, get_clock
 from hrmgmt.api.employees import _own_employee_id, _uuid
 from hrmgmt.approvals import decides_attendance
-from hrmgmt.attendance_calendar import closed_for_check_in
 from hrmgmt.attendance_grace import HALF_DAY_KINDS
 from hrmgmt.audit import record_audit
 from hrmgmt.authz import Authorizer
@@ -23,7 +23,7 @@ from hrmgmt.db import get_conn
 from hrmgmt.errors import ApiError, conflict, not_found
 from hrmgmt.principal import current_user, get_authorizer
 from hrmgmt.security import HumanPrincipal
-from hrmgmt.timeutil import Clock, ist_date, to_ist
+from hrmgmt.timeutil import Clock, ist_date
 
 router = APIRouter(prefix="/hr/v1", tags=["Attendance corrections"])
 
@@ -53,7 +53,7 @@ def _check_day(
         raise _invalid("Only a past day can be corrected. Today, check in or check out instead.")
     if day < _previous_month_start(today):
         raise _invalid("Only days in this month or last month can be corrected.")
-    kind, holiday = day_kind(conn, day)
+    kind, holiday = day_kind(conn, day, employee_id)
     if kind == "SUNDAY":
         raise _invalid("A Sunday is not a working day. Work on a day off is approved separately.")
     if kind == "HOLIDAY":
@@ -111,6 +111,13 @@ def _check_day(
         raise _invalid("This day already counts as a full day.")
 
 
+def _closed_today(conn: Connection, employee_id: str, now: datetime) -> bool:
+    """Past the time after which today is marked absent: 17:00, or the half-day split when this
+    person's afternoon is a holiday today."""
+    half = hol.half_day(ist_date(now), hol.holiday_for(conn, employee_id, ist_date(now)))
+    return hol.closed_for_check_in(now, half.day_part if half else None, cfg.load_all(conn))
+
+
 def _view(r: Any) -> dict[str, Any]:
     return {
         "correctionId": str(r["correction_id"]),
@@ -140,7 +147,7 @@ def raise_correction(
         employee_id,
         body.work_date,
         ist_date(now),
-        closed_for_check_in(to_ist(now).time(), cfg.load_all(conn)),
+        _closed_today(conn, employee_id, now),
     )
     live = conn.execute(
         text(
