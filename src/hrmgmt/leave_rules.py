@@ -11,7 +11,8 @@ out-of-fence exception on it was rejected. A day whose exception is still waitin
 there until it is decided, so the blocks never change once written. Days worked on a Sunday or
 holiday earn a comp-off day instead (once approved), not attendance days; work on the off half of
 a half-day holiday earns half a comp-off day. A half-day holiday whose working half was attended
-counts as one attendance day.
+counts as half an attendance day (7 Nov 2026): halves add up as halves towards the 22. A Sunday
+made a working day for the person counts like any working day.
 
 Special occasion leave has its own yearly quota (`leave.special_days_per_year`)."""
 
@@ -147,15 +148,21 @@ def attendance_units(
     holidays = hol.holidays_for(conn, employee_id, min(days), max(days))
     out: list[tuple[date, Decimal | None]] = []
     for day, waiting, rejected in rows:
-        if hol.is_off_day(day, holidays.get(day)):
+        share = hol.working_fraction(day, holidays.get(day))
+        if share == 0:
             continue  # off-day work earns a comp-off, not an attendance day
-        # A half-day holiday whose working half was attended counts as a whole attendance day
-        # (a choice the product owner may change).
+        # Plain arithmetic (product owner, 7 Nov 2026): a day counts at most its working share, so
+        # an attended half-day holiday is 0.5, and halves add up as halves towards the 22.
         if waiting:
             out.append((day, None))
         else:
-            out.append((day, Decimal("0.5") if rejected else Decimal(1)))
-    return apply_to_units(out, corrected)
+            out.append((day, min(Decimal("0.5") if rejected else Decimal(1), share)))
+    capped = {
+        d: min(v, hol.working_fraction(d, holidays.get(d)))
+        for d, v in corrected.items()
+        if hol.working_fraction(d, holidays.get(d)) > 0
+    }
+    return apply_to_units(out, capped)
 
 
 def _last_block(conn: Connection, employee_id: str) -> Any:
@@ -358,3 +365,42 @@ def balances(
     ):
         out[r[0]]["pending"] = Decimal(r[1])
     return out
+
+
+# ---- leave taken recently (product owner, 7 Nov 2026) -----------------------------------------
+
+RECENT_WINDOW_DAYS = 42
+# Paid: from a balance, legacy SICK and EARNED included. Unpaid: UNPAID.
+PAID_TAKEN = ("PAID", "SPECIAL", "COMP_OFF", "SICK", "EARNED")
+
+
+def recent_leave(conn: Connection, employee_id: str, before: date) -> dict[str, Any]:
+    """Approved paid and unpaid leave days in the 6 weeks (42 days) before `before` (a request's
+    from date), counted like any leave day: Sundays and the person's holidays left out, a half day
+    0.5, a day on a half-day holiday at most 0.5. Only the days inside the window count."""
+    start = before - timedelta(days=RECENT_WINDOW_DAYS)
+    end = before - timedelta(days=1)
+    holidays = hol.holidays_for(conn, employee_id, start, end)
+    paid = unpaid = _ZERO
+    for leave_type, first, last, half in conn.execute(
+        text(
+            "SELECT leave_type, from_date, to_date, half_day FROM hr.leave_request"
+            " WHERE employee_id = CAST(:e AS uuid) AND status = 'APPROVED'"
+            " AND from_date <= :b AND to_date >= :a"
+        ),
+        {"e": employee_id, "a": start, "b": end},
+    ):
+        for day in _days(max(first, start), min(last, end)):
+            amount = min(
+                Decimal("0.5") if half else Decimal(1), hol.working_fraction(day, holidays.get(day))
+            )
+            if leave_type in PAID_TAKEN:
+                paid += amount
+            else:
+                unpaid += amount
+    return {
+        "windowFrom": start.isoformat(),
+        "windowTo": end.isoformat(),
+        "paidDays": float(paid),
+        "unpaidDays": float(unpaid),
+    }

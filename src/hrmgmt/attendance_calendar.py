@@ -65,6 +65,7 @@ class Cell:
     day_kind: str = "WORKING"
     holiday: str | None = None
     half_day_holiday: dict[str, Any] | None = None
+    working_sunday: dict[str, Any] | None = None
     check_in_at: datetime | None = None
     check_out_at: datetime | None = None
     minutes: int = 0
@@ -82,6 +83,7 @@ class Cell:
             "dayKind": self.day_kind,
             "holiday": self.holiday,
             "halfDayHoliday": self.half_day_holiday,
+            "workingSunday": self.working_sunday,
             "checkInAt": self.check_in_at.isoformat() if self.check_in_at else None,
             "checkOutAt": self.check_out_at.isoformat() if self.check_out_at else None,
             "minutes": self.minutes,
@@ -170,6 +172,7 @@ def cells(
             cell.day_kind, cell.holiday = hol.day_kind(day, holidays.get(day))
             half = hol.half_day(day, holidays.get(day))
             cell.half_day_holiday = hol.half_day_view(half, values)
+            cell.working_sunday = hol.working_sunday_view(day, holidays.get(day))
             closed_today = hol.closed_for_check_in(now, half.day_part if half else None, values)
             record = records.get((eid, day))
             cell.leave = leave.get((eid, day))

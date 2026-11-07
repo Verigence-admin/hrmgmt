@@ -11,6 +11,10 @@ and either company-wide or matching one of the person's work assignments valid o
 project, or the outlet). Someone with no assignment (head office) gets only company-wide holidays.
 When several apply, a full day wins, and a morning off together with an afternoon off is a full day.
 
+Every Sunday is a day off unless a WORKING_DAY entry applies to the person (kind WORKING_DAY: a
+whole Sunday, declared, for the company or chosen projects/outlets; 7 Nov 2026). For those people
+that Sunday is an ordinary working day in everything below. A holiday that also applies wins.
+
 On a half-day holiday the other half is a working day. The times of that working half come from
 `effective_values`: with the morning off the day starts at `attendance.half_day_split` (14:00) and a
 late check-in is judged from there; with the afternoon off the day ends at the split, and no
@@ -32,6 +36,9 @@ FULL_DAY = "FULL_DAY"
 MORNING = "MORNING"
 AFTERNOON = "AFTERNOON"
 DAY_PARTS = (FULL_DAY, MORNING, AFTERNOON)
+# Kinds of entry: a holiday, or a Sunday made a working day.
+HOLIDAY = "HOLIDAY"
+WORKING_DAY = "WORKING_DAY"
 DECLARED = "DECLARED"
 TENTATIVE = "TENTATIVE"
 ALL = "ALL"
@@ -61,12 +68,20 @@ class DayHoliday:
     def is_half(self) -> bool:
         return self.day_part in (MORNING, AFTERNOON)
 
+    @property
+    def is_working_day(self) -> bool:
+        """A Sunday made a working day (no holiday applies on top)."""
+        return self.day_part == WORKING_DAY
+
 
 def combine(parts: list[tuple[str, str]]) -> DayHoliday | None:
-    """(day part, name) of every holiday that applies -> what the day is. A full day wins; a morning
-    off and an afternoon off together are a full day."""
+    """(day part, name) of every entry that applies -> what the day is. A full day wins; a morning
+    off and an afternoon off together are a full day. A working-day entry (day part WORKING_DAY)
+    counts only when no holiday applies."""
+    working = [n for p, n in parts if p == WORKING_DAY]
+    parts = [(p, n) for p, n in parts if p != WORKING_DAY]
     if not parts:
-        return None
+        return DayHoliday(WORKING_DAY, tuple(dict.fromkeys(working))) if working else None
 
     def names(selected: list[str]) -> tuple[str, ...]:
         return tuple(dict.fromkeys(selected))
@@ -88,8 +103,9 @@ def combine(parts: list[tuple[str, str]]) -> DayHoliday | None:
 
 def day_kind(day: date, holiday: DayHoliday | None) -> tuple[str, str | None]:
     """('WORKING', None), ('SUNDAY', None) or ('HOLIDAY', name). A half-day holiday is a working
-    day (its working half is required); callers show the half separately."""
-    if is_sunday(day):
+    day (its working half is required); callers show the half separately. A working Sunday is
+    WORKING (callers show it with working_sunday_view)."""
+    if _sunday_off(day, holiday):
         return "SUNDAY", None
     if holiday is not None and holiday.is_full:
         return "HOLIDAY", holiday.name
@@ -103,15 +119,27 @@ def half_day(day: date, holiday: DayHoliday | None) -> DayHoliday | None:
     return holiday
 
 
+def _sunday_off(day: date, holiday: DayHoliday | None) -> bool:
+    return is_sunday(day) and not (holiday is not None and holiday.is_working_day)
+
+
 def is_off_day(day: date, holiday: DayHoliday | None) -> bool:
-    return is_sunday(day) or (holiday is not None and holiday.is_full)
+    return _sunday_off(day, holiday) or (holiday is not None and holiday.is_full)
 
 
 def working_fraction(day: date, holiday: DayHoliday | None) -> Decimal:
-    """1 for a working day, 0.5 on a half-day holiday, 0 on a Sunday or a full holiday."""
+    """1 for a working day (a working Sunday too), 0.5 on a half-day holiday, 0 on a Sunday or a
+    full holiday."""
     if is_off_day(day, holiday):
         return _ZERO
-    return _HALF if holiday is not None else _ONE
+    return _HALF if holiday is not None and holiday.is_half else _ONE
+
+
+def working_sunday_view(day: date, holiday: DayHoliday | None) -> dict[str, Any] | None:
+    """{"name": ...} when this Sunday is a working day for the person, else None."""
+    if not is_sunday(day) or holiday is None or not holiday.is_working_day:
+        return None
+    return {"name": holiday.name}
 
 
 def half_day_view(holiday: DayHoliday | None, values: dict[str, Any]) -> dict[str, Any] | None:
@@ -231,6 +259,7 @@ class _Row:
     day_part: str
     applies_to: str
     scope: tuple[tuple[str, str | None], ...]
+    kind: str = HOLIDAY
 
 
 @dataclass(frozen=True)
@@ -249,7 +278,7 @@ def _load(conn: Connection, first: date, last: date, status: str) -> list[_Row]:
     rows = (
         conn.execute(
             text(
-                "SELECT holiday_id, holiday_date, name, day_part, applies_to FROM hr.holiday"
+                "SELECT holiday_id, holiday_date, name, day_part, applies_to, kind FROM hr.holiday"
                 " WHERE removed_at IS NULL AND status = :s"
                 " AND holiday_date >= :a AND holiday_date <= :b ORDER BY holiday_date, created_at"
             ),
@@ -279,6 +308,7 @@ def _load(conn: Connection, first: date, last: date, status: str) -> list[_Row]:
             day_part=str(r["day_part"]),
             applies_to=str(r["applies_to"]),
             scope=tuple(scope.get(str(r["holiday_id"]), [])),
+            kind=str(r["kind"]),
         )
         for r in rows
     ]
@@ -325,7 +355,7 @@ def _resolve(rows: list[_Row], assignments: list[_Assignment]) -> dict[date, Day
     parts: dict[date, list[tuple[str, str]]] = defaultdict(list)
     for r in rows:
         if applies(r, assignments):
-            parts[r.day].append((r.day_part, r.name))
+            parts[r.day].append((WORKING_DAY if r.kind == WORKING_DAY else r.day_part, r.name))
     out: dict[date, DayHoliday] = {}
     for day, found in parts.items():
         combined = combine(found)
@@ -400,18 +430,18 @@ def declared_on(conn: Connection, day: date) -> list[dict[str, Any]]:
     """Every declared holiday on a date, with who it is for, for the HR and lead day views."""
     rows = conn.execute(
         text(
-            "SELECT h.name, h.day_part, h.applies_to,"
+            "SELECT h.name, h.day_part, h.applies_to, h.kind,"
             " coalesce(array_agg(coalesce(s.outlet_name, s.project_name, s.tenant_id)"
             "   ORDER BY s.project_name, s.outlet_name) FILTER (WHERE s.scope_id IS NOT NULL),"
             "   '{}') AS scope"
             " FROM hr.holiday h LEFT JOIN hr.holiday_scope s ON s.holiday_id = h.holiday_id"
             " WHERE h.removed_at IS NULL AND h.status = 'DECLARED' AND h.holiday_date = :d"
-            " GROUP BY h.holiday_id, h.name, h.day_part, h.applies_to, h.created_at"
+            " GROUP BY h.holiday_id, h.name, h.day_part, h.applies_to, h.kind, h.created_at"
             " ORDER BY h.created_at"
         ),
         {"d": day},
     )
     return [
-        {"name": n, "dayPart": p, "appliesTo": a, "scope": [str(x) for x in scope]}
-        for n, p, a, scope in rows
+        {"name": n, "dayPart": p, "appliesTo": a, "kind": k, "scope": [str(x) for x in scope]}
+        for n, p, a, k, scope in rows
     ]

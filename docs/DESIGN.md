@@ -206,7 +206,16 @@ Each phase is deployed and checked on DEV before the next starts.
   are halved. At least half the minimum hours worked inside the off half goes to the Team Lead as
   off-day work and earns half a comp-off day. A half-day holiday counts 0.5 in leave and payroll
   working days; half-day leave on it is refused (apply for a full day, which counts 0.5). An
-  attended half-day holiday counts one attendance day towards earned paid leave. A removed holiday
+  attended half-day holiday counts half an attendance day towards earned paid leave (halves add up
+  as halves; product owner, 7 Nov 2026).
+- **Working Sundays (product owner, 7 Nov 2026).** Every Sunday is a holiday by default. HR can make
+  a given Sunday a working day for chosen projects or outlets, or for everyone: an hr.holiday row of
+  kind WORKING_DAY (a whole Sunday, declared). For those people it is an ordinary working day in
+  attendance, leave, payroll and earned leave, and work on it is not off-day work. A working Sunday
+  and a holiday for the same people on the same date are refused.
+- **Leave taken recently (product owner, 7 Nov 2026).** Every leave request shows the approver (and
+  the employee while applying) the approved paid and unpaid leave days in the 42 days before its
+  from date, counted like leave days. A removed holiday
   keeps its row; every add, change and removal is audited with before and after.
 
 ## 16. The HR module must not affect Audit Core (rules, 3 October 2026)

@@ -793,6 +793,8 @@ def today(
         # A half-day holiday stays a WORKING day (earlier app versions know only the three kinds);
         # this says which half is off and from when.
         "halfDayHoliday": hol.half_day_view(half, base_values),
+        # A Sunday made a working day for this person: dayKind is WORKING (7 Nov 2026).
+        "workingSunday": hol.working_sunday_view(work_date, declared),
         "tentativeHoliday": tentative.name if tentative else None,
         "tentativeHolidayDayPart": tentative.day_part if tentative else None,
         "day": day,
@@ -997,9 +999,34 @@ def team_attendance(
                 if not is_sunday(d)
             ],
             "otherHolidays": _scoped_holidays(conn, first, last),
+            "workingSundays": _working_sundays(conn, first, last),
         },
         "employees": employees,
     }
+
+
+def _working_sundays(conn: Connection, first: date, last: date) -> list[dict[str, Any]]:
+    """Sundays of the month made working days, with whom for ("Whole company" for everyone)."""
+    rows = conn.execute(
+        text(
+            "SELECT h.holiday_date, h.name, h.applies_to,"
+            " array_agg(coalesce(s.outlet_name, s.project_name, s.tenant_id)"
+            "           ORDER BY s.project_name, s.outlet_name) FILTER (WHERE s.scope_id IS NOT NULL)"
+            " FROM hr.holiday h LEFT JOIN hr.holiday_scope s ON s.holiday_id = h.holiday_id"
+            " WHERE h.removed_at IS NULL AND h.status = 'DECLARED' AND h.kind = 'WORKING_DAY'"
+            " AND h.holiday_date >= :a AND h.holiday_date <= :b"
+            " GROUP BY h.holiday_id, h.holiday_date, h.name, h.applies_to ORDER BY h.holiday_date"
+        ),
+        {"a": first, "b": last},
+    )
+    return [
+        {
+            "date": d.isoformat(),
+            "name": n,
+            "appliesTo": ["Whole company"] if a == "ALL" else [str(x) for x in scope or []],
+        }
+        for d, n, a, scope in rows
+    ]
 
 
 def _scoped_holidays(conn: Connection, first: date, last: date) -> list[dict[str, Any]]:
@@ -1011,6 +1038,7 @@ def _scoped_holidays(conn: Connection, first: date, last: date) -> list[dict[str
             "           ORDER BY s.project_name, s.outlet_name) AS scope"
             " FROM hr.holiday h JOIN hr.holiday_scope s ON s.holiday_id = h.holiday_id"
             " WHERE h.removed_at IS NULL AND h.status = 'DECLARED' AND h.applies_to = 'SELECTED'"
+            " AND h.kind = 'HOLIDAY'"
             " AND h.holiday_date >= :a AND h.holiday_date <= :b"
             " GROUP BY h.holiday_id, h.holiday_date, h.name, h.day_part ORDER BY h.holiday_date"
         ),

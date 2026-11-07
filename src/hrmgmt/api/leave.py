@@ -285,7 +285,18 @@ def apply_leave(
         .mappings()
         .one()
     )
-    return _view(row)
+    return {**_view(row), "recentLeave": lr.recent_leave(conn, employee_id, body.from_date)}
+
+
+@router.get("/leave/recent")
+def my_recent_leave(
+    from_date: Annotated[date, Query(alias="fromDate")],
+    user: HumanPrincipal = Depends(current_user),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """While applying: paid and unpaid leave days approved in the 6 weeks before the chosen from
+    date (product owner, 7 Nov 2026). The approver sees the same numbers with the request."""
+    return lr.recent_leave(conn, _own_employee_id(conn, user), from_date)
 
 
 def _deduct(
@@ -389,6 +400,8 @@ def leave_approvals(
                 item["coverWarnings"] = cover_warnings(
                     conn, eid, r["from_date"], r["to_date"], r["half_day"], now
                 )
+                # Leave taken in the 6 weeks before this request's from date (7 Nov 2026).
+                item["recentLeave"] = lr.recent_leave(conn, eid, r["from_date"])
             items.append(item)
     return {"items": items}
 
@@ -675,7 +688,12 @@ def employee_leave(
     return {
         "balance": _balance_view(conn, eid, year or today.year, today),
         "earning": lr.progress(conn, eid, today),
-        "requests": [_view(r) for r in rows],
+        "requests": [
+            {**_view(r), "recentLeave": lr.recent_leave(conn, eid, r["from_date"])}
+            if r["status"] == "PENDING"
+            else _view(r)
+            for r in rows
+        ],
     }
 
 

@@ -93,6 +93,7 @@ class Row:
     day_kind: str = "WORKING"
     holiday: str | None = None
     half_day_holiday: dict[str, Any] | None = None
+    working_sunday: dict[str, Any] | None = None
 
     @property
     def hours(self) -> float | None:
@@ -253,6 +254,7 @@ def build_rows(
                     leave_applied=leave_applied,
                 )
                 row.day_kind, row.holiday = hol.day_kind(day, holiday)
+                row.working_sunday = hol.working_sunday_view(day, holiday)
                 if half is not None and values is not None:
                     row.half_day_holiday = hol.half_day_view(half, values)
                 elif half is not None:
@@ -417,6 +419,7 @@ def row_view(row: Row) -> dict[str, Any]:
         "dayKind": row.day_kind,
         "holiday": row.holiday,
         "halfDayHoliday": row.half_day_holiday,
+        "workingSunday": row.working_sunday,
         "delinquencies": [
             {
                 "code": d["code"],
