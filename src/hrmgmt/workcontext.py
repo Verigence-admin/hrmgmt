@@ -69,6 +69,27 @@ class WorkContextClient:
             raise WorkContextError("Audit Core gave an unexpected answer.")
         return rows
 
+    def report_leavers(self, leavers: list[dict[str, Any]]) -> int:
+        """Tell Audit Core who has left and their last day (2026-11-09). The whole list each
+        time: someone made active again drops off it. Returns how many roles Audit Core ended."""
+        try:
+            token = self._token(AUDIENCE)
+            response = self._client.put(
+                "/v1/service/hr/employment",
+                json={"leavers": leavers},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        except httpx.HTTPError as exc:
+            raise WorkContextError("Audit Core could not be reached.") from exc
+        except Exception as exc:  # token problems arrive as AuthzUnavailableError
+            raise WorkContextError("A service token for Audit Core could not be obtained.") from exc
+        if response.status_code != 200:
+            raise WorkContextError(f"Audit Core answered HTTP {response.status_code}.")
+        try:
+            return int(response.json().get("rolesEnded") or 0)
+        except (ValueError, TypeError, AttributeError):
+            return 0
+
 
 @dataclass(frozen=True)
 class SyncResult:
@@ -196,7 +217,27 @@ def run_sync(engine: Engine, client: WorkContextClient, *, force: bool = False) 
             {"n": now, "s": seen},
         )
     logger.info("hr_work_sync_ok", assignments=seen)
+    report_leavers(engine, client)
     return SyncResult(ok=True, seen=seen)
+
+
+def report_leavers(engine: Engine, client: WorkContextClient) -> bool:
+    """Send Audit Core who has left (leavers.leavers): after each status change and with the daily
+    sync. One attempt; a failure is logged and the next one sends the whole list again."""
+    from hrmgmt.leavers import leavers
+
+    try:
+        with engine.connect() as conn:
+            items = leavers(conn)
+        ended = client.report_leavers(items)
+    except WorkContextError as exc:
+        logger.warning("hr_leavers_report_failed", error=str(exc))
+        return False
+    except Exception as exc:
+        logger.warning("hr_leavers_report_failed", error_type=type(exc).__name__)
+        return False
+    logger.info("hr_leavers_reported", leavers=len(items), roles_ended=ended)
+    return True
 
 
 class DailySync:

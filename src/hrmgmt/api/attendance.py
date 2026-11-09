@@ -41,6 +41,7 @@ from hrmgmt.faceidentity import profile_face
 from hrmgmt.facematch import embed, similarity
 from hrmgmt.geo import haversine_m
 from hrmgmt.geocode import ReverseGeocoder
+from hrmgmt.leavers import LAST_DAY_SQL, after_last_day, employed_on_or_after
 from hrmgmt.night_control import night_file_download
 from hrmgmt.principal import current_user, get_authorizer, has_permission, require_permission
 from hrmgmt.security import HumanPrincipal
@@ -914,7 +915,8 @@ def team_attendance(
 ) -> dict[str, Any]:
     """HR and the CEO: the month at a glance. The month's working days and holidays, and for every
     active employee the days present, on leave and absent, work on a day off, and what waits for
-    approval. Holidays are per person (a holiday may be for some projects or outlets only, or for
+    approval. Someone who has left is listed for a month they worked in, counted up to their last
+    day. Holidays are per person (a holiday may be for some projects or outlets only, or for
     half a day): a half-day holiday is half a working day."""
     now = clock()
     today = ist_date(now)
@@ -937,10 +939,11 @@ def team_attendance(
         conn.execute(
             text(
                 "SELECT e.employee_id, e.employee_code, e.full_name, e.date_of_joining,"
+                f" {LAST_DAY_SQL} AS last_day,"
                 " (SELECT count(*) FROM hr.attendance_exception x"
                 "   WHERE x.employee_id = e.employee_id AND x.status = 'PENDING'"
                 "     AND x.work_date >= :a AND x.work_date < :b) AS pending"
-                " FROM hr.employee e WHERE e.employment_status = 'ACTIVE'"
+                f" FROM hr.employee e WHERE {employed_on_or_after('a')}"
                 " ORDER BY lower(e.full_name), e.employee_code"
             ),
             {"a": first, "b": nxt},
@@ -953,9 +956,14 @@ def team_attendance(
     for r in people:
         eid = str(r["employee_id"])
         mine_holidays = by_person.get(eid, {})
-        share = {d: hol.working_fraction(d, mine_holidays.get(d)) for d in days}
-        working = [d for d in days if share[d] > 0]
-        off = [d for d in days if share[d] == 0]
+        # Someone who has left counts only up to their last day (2026-11-09).
+        share = {
+            d: hol.working_fraction(d, mine_holidays.get(d))
+            for d in days
+            if not after_last_day(r["last_day"], d)
+        }
+        working = [d for d in share if share[d] > 0]
+        off = [d for d in share if share[d] == 0]
         here = present.get(eid, set())
         mine = leave.get(eid, {})
         joined = r["date_of_joining"]

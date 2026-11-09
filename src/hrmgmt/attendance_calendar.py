@@ -30,6 +30,7 @@ from sqlalchemy import Connection, text
 from hrmgmt import holidays as hol
 from hrmgmt.attendance_correction import live_by_day
 from hrmgmt.attendance_grace import HALF_DAY_KINDS
+from hrmgmt.leavers import after_last_day, last_days
 from hrmgmt.timeutil import ist_date, parse_hhmm
 
 LABELS = {
@@ -47,6 +48,7 @@ LABELS = {
     "OFF_DAY_WORKED": "Worked on a day off",
     "UPCOMING": "",
     "NOT_JOINED": "Before joining",
+    "LEFT": "After leaving",
 }
 
 
@@ -120,6 +122,7 @@ def cells(
             p,
         )
     }
+    left = last_days(conn, employee_ids)
     records = {
         (str(r["employee_id"]), r["work_date"]): r
         for r in conn.execute(
@@ -181,7 +184,7 @@ def cells(
             if record is not None:
                 cell.check_in_at = record["check_in_at"]
                 cell.check_out_at = record["check_out_at"]
-            _decide(cell, joined.get(eid), today, closed_today, now)
+            _decide(cell, joined.get(eid), today, closed_today, now, left.get(eid))
             mine[day] = cell
             day += timedelta(days=1)
         out[eid] = mine
@@ -189,7 +192,12 @@ def cells(
 
 
 def _decide(
-    cell: Cell, joined: date | None, today: date, closed_today: bool, now: datetime
+    cell: Cell,
+    joined: date | None,
+    today: date,
+    closed_today: bool,
+    now: datetime,
+    last_day: date | None = None,
 ) -> None:
     day = cell.day
     if cell.check_in_at and cell.check_out_at:
@@ -199,6 +207,9 @@ def _decide(
 
     if cell.check_in_at is None and joined is not None and day < joined:
         cell.status = "NOT_JOINED"
+        return
+    if cell.check_in_at is None and after_last_day(last_day, day):
+        cell.status = "LEFT"
         return
     if cell.day_kind != "WORKING":
         cell.status = "OFF_DAY_WORKED" if cell.check_in_at else "OFF_DAY"

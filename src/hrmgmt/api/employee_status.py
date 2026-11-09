@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import Connection, text
 from sqlalchemy.exc import IntegrityError
@@ -23,12 +23,13 @@ from hrmgmt import validators as v
 from hrmgmt.api.employees import EmploymentStatus, get_provisioner
 from hrmgmt.audit import record_audit
 from hrmgmt.authz import Authorizer
-from hrmgmt.db import get_conn
+from hrmgmt.db import get_conn, get_engine
 from hrmgmt.errors import ApiError, conflict, forbidden, not_found
 from hrmgmt.principal import get_authorizer, has_permission, require_permission
 from hrmgmt.provisioning import ProvisioningError, UserProvisioner
 from hrmgmt.security import HumanPrincipal
 from hrmgmt.timeutil import Clock, ist_date, utc_now
+from hrmgmt.workcontext import report_leavers
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/hr/v1", tags=["Employee status"])
@@ -121,6 +122,7 @@ def request_status_change(
     employee_id: str,
     body: StatusChangeIn,
     request: Request,
+    background: BackgroundTasks,
     user: HumanPrincipal = Depends(can_manage),
     clock: Clock = Depends(get_clock),
     provisioner: UserProvisioner | None = Depends(get_provisioner),
@@ -193,6 +195,7 @@ def request_status_change(
             effective,
             body.reason,
             provisioner,
+            background,
         )
     record_audit(
         conn,
@@ -222,6 +225,7 @@ def _change_now(
     effective: date,
     reason: str,
     provisioner: UserProvisioner | None,
+    background: BackgroundTasks,
 ) -> dict[str, Any]:
     """The status changes now: the request is recorded as decided by the person who made it, and the
     Verigence login follows with the one attempt every status change makes (never reactivating)."""
@@ -254,6 +258,7 @@ def _change_now(
         request=request,
     )
     conn.commit()  # the change stands even if the login step below does not work
+    _tell_audit_core(request, background)
     outcome = _login_step(provisioner, login_user_id, to_status)
     conn.execute(
         text(
@@ -329,6 +334,7 @@ def _locked_open(conn: Connection, change_id: str) -> Any:
 def approve_status_change(
     change_id: str,
     request: Request,
+    background: BackgroundTasks,
     body: DecisionIn | None = None,
     user: HumanPrincipal = Depends(can_approve),
     provisioner: UserProvisioner | None = Depends(get_provisioner),
@@ -380,6 +386,7 @@ def approve_status_change(
         request=request,
     )
     conn.commit()  # the approval stands even if the login step below does not work
+    _tell_audit_core(request, background)
 
     outcome = _login_step(provisioner, employee["uid"], row["to_status"])
     conn.execute(
@@ -390,6 +397,14 @@ def approve_status_change(
         {"o": outcome, "id": change_id},
     )
     return _view(_one(conn, change_id))
+
+
+def _tell_audit_core(request: Request, background: BackgroundTasks) -> None:
+    """Audit Core hears who has left once the answer has gone back (2026-11-09): it ends their
+    project roles after their last day and leaves them out of its reports. Never waited on."""
+    client = getattr(request.app.state, "workcontext", None)
+    if client is not None:
+        background.add_task(report_leavers, get_engine(), client)
 
 
 def _login_step(provisioner: UserProvisioner | None, user_id: str | None, to_status: str) -> str:

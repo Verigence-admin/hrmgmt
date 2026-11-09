@@ -15,6 +15,7 @@ from sqlalchemy import Connection, text
 
 from hrmgmt import holidays as hol
 from hrmgmt.attendance_correction import live_by_day
+from hrmgmt.leavers import LAST_DAY_SQL, after_last_day, employed_on_or_after
 from hrmgmt.timeutil import IST
 
 MAX_RANGE_DAYS = 31
@@ -141,12 +142,13 @@ def build_rows(
     employees = (
         conn.execute(
             text(
-                """
-                SELECT employee_id, employee_code, full_name, security_user_id, date_of_joining
-                FROM hr.employee
-                WHERE employment_status = 'ACTIVE'
-                  AND (CAST(:e AS uuid) IS NULL OR employee_id = CAST(:e AS uuid))
-                ORDER BY lower(full_name), employee_code
+                f"""
+                SELECT e.employee_id, e.employee_code, e.full_name, e.security_user_id,
+                       e.date_of_joining, {LAST_DAY_SQL} AS last_day
+                FROM hr.employee e
+                WHERE {employed_on_or_after("a")}
+                  AND (CAST(:e AS uuid) IS NULL OR e.employee_id = CAST(:e AS uuid))
+                ORDER BY lower(e.full_name), e.employee_code
                 """
             ),
             params,
@@ -228,6 +230,9 @@ def build_rows(
             # Before the joining date there is nothing to expect, but a check-in that was made is
             # always shown, so a wrong joining date can never hide someone who was at work.
             if joined is not None and joined > day and record is None:
+                continue
+            # Someone who has left is shown up to their last day (2026-11-09).
+            if after_last_day(emp["last_day"], day) and record is None:
                 continue
             if non_working and record is None:
                 continue
