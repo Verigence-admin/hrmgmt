@@ -76,6 +76,22 @@ SPECS: dict[str, Spec] = {
     "attendance.face_match_on": Spec(
         "int", 1, 0, 1, "Check that the face matches (1 = on, 0 = off)", "Attendance"
     ),
+    "attendance.face_mismatch_reject": Spec(
+        "int",
+        1,
+        0,
+        1,
+        "Refuse a check-in or check-out whose face does not match (1 = refuse, 0 = only flag for HR)",
+        "Attendance",
+    ),
+    "attendance.no_face_reject": Spec(
+        "int",
+        1,
+        0,
+        1,
+        "Refuse a check-in or check-out photo with no face in it (1 = refuse, 0 = only flag for HR)",
+        "Attendance",
+    ),
     "attendance.face_match_threshold": Spec(
         "int",
         363,

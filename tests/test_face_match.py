@@ -1,4 +1,5 @@
-"""Does the face in a check-in or check-out photo match the employee? Only ever a flag for HR."""
+"""Does the face in a check-in or check-out photo match the employee? Refused when it does not
+(product owner, 9 Nov 2026); HR can set it back to a flag only."""
 
 from __future__ import annotations
 
@@ -30,6 +31,32 @@ def world(migrated_engine):
     w = World(migrated_engine, now=ist(2026, 10, 5, 10, 0))
     w.clean_assignments()
     return w
+
+
+def setting(world, key, value):
+    with world.engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO hr.setting (key, value) VALUES (:k, :v)"
+                " ON CONFLICT (key) DO UPDATE SET value = :v"
+            ),
+            {"k": key, "v": value},
+        )
+
+
+@pytest.fixture()
+def flag_only(world):
+    """The behaviour before 9 Nov 2026: a mismatch or a missing face is only flagged."""
+    setting(world, "attendance.face_mismatch_reject", "0")
+    setting(world, "attendance.no_face_reject", "0")
+    yield
+    with world.engine.begin() as conn:
+        conn.execute(
+            text(
+                "DELETE FROM hr.setting WHERE key IN"
+                " ('attendance.face_mismatch_reject', 'attendance.no_face_reject')"
+            )
+        )
 
 
 def person(world):
@@ -169,7 +196,9 @@ def test_the_profile_photo_is_the_reference_for_check_in_and_check_out(world):
     assert delinquencies(world, emp) == []
 
 
-def test_a_different_face_at_check_in_or_check_out_is_flagged_not_refused(world, monkeypatch):
+def test_a_different_face_at_check_in_or_check_out_is_flagged_not_refused(
+    world, monkeypatch, flag_only
+):
     hr, emp, user = person(world)
     set_profile_photo(world, hr, emp)
     monkeypatch.setattr("hrmgmt.api.attendance.embed", lambda image: numbers(7))
@@ -204,7 +233,7 @@ def test_a_photo_set_before_face_matching_existed_is_worked_out_the_first_time(w
         )
 
 
-def test_a_new_profile_photo_replaces_the_old_numbers(world, monkeypatch):
+def test_a_new_profile_photo_replaces_the_old_numbers(world, monkeypatch, flag_only):
     hr, emp, user = person(world)
     monkeypatch.setattr("hrmgmt.api.employees.embed", lambda image: numbers(3))
     set_profile_photo(world, hr, emp)
@@ -232,7 +261,7 @@ def test_without_a_profile_photo_the_check_out_is_compared_with_the_check_in(wor
 
 
 def test_a_different_person_at_check_out_than_at_check_in_is_flagged_with_that_wording(
-    world, monkeypatch
+    world, monkeypatch, flag_only
 ):
     _, emp, user = person(world)
     monkeypatch.setattr("hrmgmt.api.attendance.embed", lambda image: numbers(1))
@@ -267,7 +296,7 @@ def test_a_profile_photo_without_a_clear_face_falls_back_to_the_check_in_photo(w
 # ---- never in the way ------------------------------------------------------------------------
 
 
-def test_a_photo_with_no_face_is_only_no_face_never_a_mismatch(world, monkeypatch):
+def test_a_photo_with_no_face_is_only_no_face_never_a_mismatch(world, monkeypatch, flag_only):
     hr, emp, user = person(world)
     set_profile_photo(world, hr, emp)
     monkeypatch.setattr("hrmgmt.api.attendance.face_present", lambda image: False)
@@ -294,7 +323,7 @@ def test_hr_can_switch_it_off_and_nothing_is_compared_or_kept(world, monkeypatch
             conn.execute(text("DELETE FROM hr.setting WHERE key = 'attendance.face_match_on'"))
 
 
-def test_a_stricter_cut_off_flags_a_weaker_match(world, monkeypatch):
+def test_a_stricter_cut_off_flags_a_weaker_match(world, monkeypatch, flag_only):
     hr, emp, user = person(world)
     set_profile_photo(world, hr, emp)
     face = Image.open(_FACE_FILE).convert("RGB").rotate(-20, fillcolor=(128, 128, 128))
@@ -359,3 +388,62 @@ def test_hr_sees_the_score_and_what_it_was_compared_with_but_not_the_employee(wo
     assert "FaceScore" not in own and "face_score" not in own
     # someone who has not checked in has no score
     assert all(r["checkInFaceScore"] is None for r in rows if r["checkInAt"] is None)
+
+
+# ---- refused (product owner, 9 Nov 2026) -----------------------------------------------------
+
+
+def refused(world, user, event, photo=FACE):
+    purpose = "CHECK_IN" if event == "in" else "CHECK_OUT"
+    path = "/hr/v1/attendance/check-in" if event == "in" else "/hr/v1/attendance/check-out"
+    r = world.client.post(
+        path,
+        headers=world.headers(user),
+        data={
+            "token": token(world, user, purpose),
+            "latitude": str(NEAR[0]),
+            "longitude": str(NEAR[1]),
+            "accuracy_m": "20",
+            "position_age_s": "3",
+        },
+        files={"photo": ("p.jpg", photo, "image/jpeg")},
+    )
+    return r
+
+
+def test_a_face_that_does_not_match_is_refused_and_nothing_is_saved(world, monkeypatch):
+    hr, emp, user = person(world)
+    set_profile_photo(world, hr, emp)
+    monkeypatch.setattr("hrmgmt.api.attendance.embed", lambda image: numbers(7))
+    r = refused(world, user, "in")
+    assert r.status_code == 422, r.text
+    body = r.json()
+    assert body["code"] == "ATTENDANCE_PHOTO_NOT_ACCEPTED"
+    assert "does not match your profile photo" in body["detail"]
+    with world.engine.connect() as conn:
+        saved = conn.execute(
+            text(
+                "SELECT count(*) FROM hr.attendance_day"
+                " WHERE employee_id = CAST(:e AS uuid) AND check_in_at IS NOT NULL"
+            ),
+            {"e": emp["employeeId"]},
+        ).scalar_one()
+    assert saved == 0
+    # Taking the photo again with the right face goes through.
+    monkeypatch.undo()
+    assert punch(world, user, "in")["flags"] == []
+
+
+def test_a_photo_with_no_face_is_refused(world, monkeypatch):
+    hr, emp, user = person(world)
+    set_profile_photo(world, hr, emp)
+    monkeypatch.setattr("hrmgmt.api.attendance.face_present", lambda image: False)
+    r = refused(world, user, "in")
+    assert r.status_code == 422 and r.json()["code"] == "ATTENDANCE_PHOTO_NOT_ACCEPTED"
+    assert "No face was found" in r.json()["detail"]
+
+
+def test_without_anything_to_compare_with_nobody_is_refused(world):
+    _, emp, user = person(world)  # no profile photo, first check-in of the day
+    assert punch(world, user, "in")["flags"] == []
+    assert day(world, emp)["check_in_face_score"] is None
