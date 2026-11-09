@@ -129,7 +129,8 @@ def test_nothing_is_tried_twice_within_five_minutes(clean):
     client = client_for([row()], calls=calls)
     assert wc.run_sync(clean, client).ok
     again = wc.run_sync(clean, client)
-    assert again.skipped and len(calls) == 1
+    # one fetch, then who has left goes to Audit Core (2026-11-09); nothing more
+    assert again.skipped and [c.method for c in calls] == ["GET", "PUT"]
 
 
 def test_ids_that_are_not_user_ids_are_ignored(clean):
