@@ -137,13 +137,13 @@ SPECS: dict[str, Spec] = {
     "company.pf_registration": Spec("text", "", label="PF registration number", group="Company"),
     "email.sign_in_url": Spec(
         "text",
-        "https://verigence-web-dev.jbrconsulting-it.workers.dev",
+        "https://verigence.jbrconsulting.in",
         label="Sign-in link put in employee emails",
         group="Email",
     ),
     "email.app_download_url": Spec(
         "text",
-        "https://verigence-web-dev.jbrconsulting-it.workers.dev/apps",
+        "https://verigence.jbrconsulting.in/apps",
         label="Link put in employee emails: sign in, then the app download page",
         group="Email",
     ),
