@@ -4,6 +4,7 @@ import uuid
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image, ImageDraw, ImageEnhance
 from sqlalchemy import text
 
@@ -14,6 +15,21 @@ from tests.test_attendance import send, token
 
 # A public-domain NASA portrait (scikit-image's "astronaut"), only to prove the detector works at all.
 _FACE = Path(__file__).parent / "fixtures" / "face_public_domain.jpg"
+
+
+@pytest.fixture()
+def no_face_flag_only(migrated_engine):
+    """HR set "no face" back to a flag only (since 9 Nov 2026 it is refused by default)."""
+    with migrated_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO hr.setting (key, value) VALUES ('attendance.no_face_reject', '0')"
+                " ON CONFLICT (key) DO UPDATE SET value = '0'"
+            )
+        )
+    yield
+    with migrated_engine.begin() as conn:
+        conn.execute(text("DELETE FROM hr.setting WHERE key = 'attendance.no_face_reject'"))
 
 
 def test_a_plain_picture_has_no_face():
@@ -72,7 +88,9 @@ def test_a_ceiling_a_wall_and_noise_have_no_face():
         assert face_present(picture) is False
 
 
-def test_a_photo_without_a_face_is_accepted_but_flagged_for_hr(migrated_engine, monkeypatch):
+def test_with_refusal_off_a_photo_without_a_face_is_accepted_but_flagged(
+    migrated_engine, monkeypatch, no_face_flag_only
+):
     world = World(migrated_engine, now=ist(2026, 10, 5, 10, 0))
     world.clean_assignments()
     with migrated_engine.begin() as conn:
@@ -95,7 +113,7 @@ def test_a_photo_without_a_face_is_accepted_but_flagged_for_hr(migrated_engine, 
     assert mine["status"] == "CHECKED_IN"  # nothing waits for approval
 
 
-def test_the_flag_says_which_photo_it_is_for(migrated_engine, monkeypatch):
+def test_the_flag_says_which_photo_it_is_for(migrated_engine, monkeypatch, no_face_flag_only):
     world = World(migrated_engine, now=ist(2026, 10, 5, 10, 0))
     world.clean_assignments()
     with migrated_engine.begin() as conn:

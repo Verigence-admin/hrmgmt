@@ -416,6 +416,32 @@ def _record_event(
             if face_score is None:
                 face_ref = None
     face_matched = time.perf_counter()
+    # Product owner, 9 Nov 2026: "lets start rejecting if the score is low". A photo whose face does
+    # not match (or that has no face, which would otherwise be the way round it) is refused: the
+    # person takes the photo again. Nothing is saved; the refusal is logged for HR. A person with no
+    # reference to compare with (no profile photo, a first check-in) is never refused for it.
+    refusal = None
+    if "FACE_MISMATCH" in flags and int(values["attendance.face_mismatch_reject"]) == 1:
+        refusal = (
+            "Your face does not match your profile photo, so this was not accepted. Take the photo"
+            " again, facing the camera in good light. If it keeps failing, ask HR to update your"
+            " profile photo."
+        )
+    elif "NO_FACE" in flags and int(values["attendance.no_face_reject"]) == 1:
+        refusal = (
+            "No face was found in the photo, so this was not accepted. Take the photo again with"
+            " your face clearly in the frame."
+        )
+    if refusal is not None:
+        logger.warning(
+            "hr_attendance_face_refused",
+            employee_id=employee_id,
+            side=event,
+            reason="FACE_MISMATCH" if "FACE_MISMATCH" in flags else "NO_FACE",
+            score=round(face_score, 3) if face_score is not None else None,
+            reference=face_ref,
+        )
+        raise ApiError(422, "ATTENDANCE_PHOTO_NOT_ACCEPTED", refusal)
 
     address = geocoder.address(latitude, longitude) if geocoder else None
     geocoded = time.perf_counter()
