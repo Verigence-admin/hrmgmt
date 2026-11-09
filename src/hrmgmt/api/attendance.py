@@ -807,14 +807,7 @@ def today(
             if sync.get("last_success_at")
             else None
         ),
-        "standardTimes": {
-            "checkIn": values["attendance.check_in_standard"],
-            "lateAfter": values["attendance.late_after"],
-            "checkOutEarliest": values["attendance.check_out_earliest"],
-            "checkOut": values["attendance.check_out_standard"],
-            "absentAfter": values["attendance.absent_after"],
-            "minimumHours": float(values["attendance.min_work_hours"]),
-        },
+        "standardTimes": hol.standard_times_view(values),
     }
 
 

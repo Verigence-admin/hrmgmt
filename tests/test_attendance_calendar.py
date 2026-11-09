@@ -200,13 +200,27 @@ def test_team_daily_rows_carry_hours_week_total_and_shared(world):
     world.clock.set(ist(2026, 10, 6, 10, 20))
     send(world, pc, "in", token(world, pc))
     world.clock.set(ist(2026, 10, 6, 12, 20))
-    rows = world.client.get(
+    body = world.client.get(
         "/hr/v1/attendance/team-daily", params={"date": "2026-10-06"}, headers=world.headers(tl)
-    ).json()["rows"]
+    ).json()
+    rows = body["rows"]
     mine = {r["employeeCode"]: r for r in rows}
     assert mine[emp["employeeCode"]]["weekMinutes"] == 480
     assert mine[emp["employeeCode"]]["runningMinutes"] == 120
     assert mine[shared_emp["employeeCode"]]["shared"] is True
+    # The day's times, so the screen can say how late a check-in was (product owner, 9 Nov 2026).
+    times = {
+        "checkIn": "10:30",
+        "lateAfter": "11:15",
+        "checkOutEarliest": "17:00",
+        "checkOut": "18:30",
+        "absentAfter": "17:00",
+        "minimumHours": 5.0,
+    }
+    assert body["standardTimes"] == times
+    assert all(r["standardTimes"] == times for r in rows)
+    # Face scores stay in HR's own view.
+    assert all("checkInFaceScore" not in r and "checkOutFaceScore" not in r for r in rows)
 
 
 def test_a_lead_sees_the_calendar_of_their_people_only(world):
