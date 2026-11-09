@@ -437,6 +437,23 @@ def test_morning_off_late_is_judged_from_the_split(world):
     assert "after 14:45" in late.json()["detail"]
 
 
+def test_team_daily_carries_each_persons_times_moved_by_a_half_day_holiday(world):
+    _, pc, tl = pc_with_lead(world)
+    half(world, "MORNING")
+    at(world, 14, 50)
+    send(world, pc, "in", token(world, pc), reason="traffic")
+    body = world.client.get(
+        "/hr/v1/attendance/team-daily", params={"date": TUE.isoformat()}, headers=world.headers(tl)
+    ).json()
+    assert body["standardTimes"]["checkIn"] == "10:30"  # the company's ordinary day
+    row = next(r for r in body["rows"] if r["checkInAt"])
+    assert row["standardTimes"]["checkIn"] == "14:00"
+    assert row["standardTimes"]["lateAfter"] == "14:45"
+    assert row["standardTimes"]["minimumHours"] == 2.5
+    assert [d["code"] for d in row["delinquencies"]] == ["LATE_CHECK_IN"]
+    assert row["delinquencies"][0]["side"] == "CHECK_IN"
+
+
 def test_afternoon_off_ends_the_day_at_the_split(world):
     _, pc, _ = pc_with_lead(world)
     half(world, "AFTERNOON")

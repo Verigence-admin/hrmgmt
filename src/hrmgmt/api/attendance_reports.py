@@ -517,6 +517,7 @@ def team_daily_attendance(
     projects = _lead_projects(conn, authorizer, user, now)
     if project_code and projects is not None and project_code not in projects:
         raise forbidden("You do not lead that project.")
+    values = cfg.load_all(conn)
     all_rows = build_rows(
         conn,
         day,
@@ -524,7 +525,7 @@ def team_daily_attendance(
         today=today,
         closed_today=_closed(conn, now),
         now=now,
-        values=cfg.load_all(conn),
+        values=values,
     )
     rows = [
         r
@@ -544,11 +545,17 @@ def team_daily_attendance(
         week,
         week + timedelta(days=6),
         now=now,
-        values=cfg.load_all(conn),
+        values=values,
     )
     views = []
     for r in rows:
         view = row_view(r)
+        # The person's own times for the day (a half-day holiday moves them), so a screen can say
+        # how late a check-in was or how early a check-out, by the same rule that flagged it.
+        half = r.half_day_holiday or {}
+        view["standardTimes"] = hol.standard_times_view(
+            hol.effective_values(values, half.get("dayPart"))
+        )
         for key in _HR_ONLY:
             view.pop(key, None)
         mine = by_person.get(r.employee_id, {})
@@ -568,6 +575,9 @@ def team_daily_attendance(
         "holiday": holiday_name,
         # Company-wide above; every declared holiday of the day (half days, projects, outlets) here.
         "holidays": hol.declared_on(conn, day),
+        # The company's times for an ordinary day (today's settings; a past day's flags were set by
+        # the settings of that day). Each row carries its own, moved by a half-day holiday.
+        "standardTimes": hol.standard_times_view(values),
         "summary": _summary(rows),
         "projects": [
             {"projectCode": code, "projectName": name, "summary": _summary(items)}

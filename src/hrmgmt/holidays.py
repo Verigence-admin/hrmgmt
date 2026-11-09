@@ -203,6 +203,20 @@ def effective_values(values: dict[str, Any], day_part: str | None) -> dict[str, 
     return out
 
 
+def standard_times_view(values: dict[str, Any]) -> dict[str, Any]:
+    """The day's times as a person reads them (from effective_values for their own day): when the
+    day starts, after when a check-in is late, the earliest check-out without an early flag, the
+    standard end and when a missing check-in becomes an absence."""
+    return {
+        "checkIn": values["attendance.check_in_standard"],
+        "lateAfter": values["attendance.late_after"],
+        "checkOutEarliest": values["attendance.check_out_earliest"],
+        "checkOut": values["attendance.check_out_standard"],
+        "absentAfter": values["attendance.absent_after"],
+        "minimumHours": float(values["attendance.min_work_hours"]),
+    }
+
+
 def _bounds(day: date) -> tuple[datetime, datetime]:
     start = datetime.combine(day, time.min, tzinfo=IST)
     return start, start + timedelta(days=1)
