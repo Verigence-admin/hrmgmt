@@ -4,7 +4,7 @@ is described in hrmgmt.attendance_correction."""
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -16,6 +16,7 @@ from hrmgmt import settings_store as cfg
 from hrmgmt.api.attendance import day_kind, get_clock
 from hrmgmt.api.employees import _own_employee_id, _uuid
 from hrmgmt.approvals import decides_attendance
+from hrmgmt.attendance_correction import CHECK_OUT, CORRECTED_CHECK_OUT_FLAG
 from hrmgmt.attendance_grace import HALF_DAY_KINDS
 from hrmgmt.audit import record_audit
 from hrmgmt.authz import Authorizer
@@ -23,7 +24,7 @@ from hrmgmt.db import get_conn
 from hrmgmt.errors import ApiError, conflict, not_found
 from hrmgmt.principal import current_user, get_authorizer
 from hrmgmt.security import HumanPrincipal
-from hrmgmt.timeutil import Clock, ist_date
+from hrmgmt.timeutil import IST, Clock, ist_date
 
 router = APIRouter(prefix="/hr/v1", tags=["Attendance corrections"])
 
@@ -31,8 +32,10 @@ router = APIRouter(prefix="/hr/v1", tags=["Attendance corrections"])
 class CorrectionIn(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     work_date: date = Field(alias="workDate")
-    requested: Literal["FULL_DAY", "HALF_DAY"]
+    requested: Literal["FULL_DAY", "HALF_DAY", "CHECK_OUT"]
     reason: str = Field(min_length=1, max_length=500)
+    # CHECK_OUT only: the time the person left that day, IST, "HH:MM".
+    check_out_time: time | None = Field(default=None, alias="checkOutTime")
 
 
 def _invalid(message: str) -> ApiError:
@@ -114,6 +117,59 @@ def _check_day(
         raise _invalid("This day already counts as a full day.")
 
 
+def _check_out_moment(
+    conn: Connection, employee_id: str, day: date, left_at: time | None, now: datetime
+) -> datetime:
+    """A missed check-out (product owner, 10 Nov 2026): the day has a check-in and no check-out --
+    today, or an earlier day of this month -- and the time given is after the check-in, on that
+    day, and not later than now. Returns the moment to record."""
+    if left_at is None:
+        raise _invalid("Give the time you left.")
+    today = ist_date(now)
+    if day > today:
+        raise _invalid("A check-out can only be recorded for today or an earlier day.")
+    if day < _month_start(today):
+        raise _invalid(
+            f"Only days in {today:%B %Y} can be corrected. A day of an earlier month cannot be raised."
+        )
+    locked = conn.execute(
+        text(
+            "SELECT 1 FROM hr.payroll_run WHERE pay_month = :m"
+            " AND status IN ('SUBMITTED', 'APPROVED', 'PAID')"
+        ),
+        {"m": day.replace(day=1)},
+    ).first()
+    if locked:
+        raise _invalid(f"Payroll for {day:%B %Y} has already been submitted. Speak to HR.")
+    record = (
+        conn.execute(
+            text(
+                "SELECT check_in_at, check_out_at FROM hr.attendance_day"
+                " WHERE employee_id = CAST(:e AS uuid) AND work_date = :d"
+            ),
+            {"e": employee_id, "d": day},
+        )
+        .mappings()
+        .first()
+    )
+    if record is None or record["check_in_at"] is None:
+        raise _invalid(
+            "There is no check-in on that day, so there is no check-out to record. Ask for the day"
+            " to count as a full day or a half day instead."
+        )
+    if record["check_out_at"] is not None:
+        raise _invalid("You have already checked out that day.")
+    moment = datetime.combine(day, left_at.replace(second=0, microsecond=0), tzinfo=IST)
+    if moment <= record["check_in_at"]:
+        raise _invalid(
+            f"The time you left must be after your check-in at "
+            f"{record['check_in_at'].astimezone(IST):%H:%M}."
+        )
+    if moment > now + timedelta(minutes=1):
+        raise _invalid("The time you left cannot be later than now.")
+    return moment
+
+
 def _closed_today(conn: Connection, employee_id: str, now: datetime) -> bool:
     """Past the time after which today is marked absent: 17:00, or the half-day split when this
     person's afternoon is a holiday today."""
@@ -128,6 +184,7 @@ def _view(r: Any) -> dict[str, Any]:
         "requested": r["requested"],
         "reason": r["reason"],
         "status": r["status"],
+        "checkOutAt": r["check_out_at"].isoformat() if r["check_out_at"] else None,
         "decisionNote": r["decision_note"],
         "decidedAt": r["decided_at"].isoformat() if r["decided_at"] else None,
         "createdAt": r["created_at"].isoformat(),
@@ -145,13 +202,17 @@ def raise_correction(
     """An employee asks for a past working day to count as a full day or a half day."""
     employee_id = _own_employee_id(conn, user)
     now = clock()
-    _check_day(
-        conn,
-        employee_id,
-        body.work_date,
-        ist_date(now),
-        _closed_today(conn, employee_id, now),
-    )
+    left_at = None
+    if body.requested == CHECK_OUT:
+        left_at = _check_out_moment(conn, employee_id, body.work_date, body.check_out_time, now)
+    else:
+        _check_day(
+            conn,
+            employee_id,
+            body.work_date,
+            ist_date(now),
+            _closed_today(conn, employee_id, now),
+        )
     live = conn.execute(
         text(
             "SELECT status FROM hr.attendance_correction WHERE employee_id = CAST(:e AS uuid)"
@@ -170,13 +231,15 @@ def raise_correction(
         conn.execute(
             text(
                 "INSERT INTO hr.attendance_correction (employee_id, work_date, requested, reason,"
-                " created_at) VALUES (CAST(:e AS uuid), :d, :q, :r, :n) RETURNING *"
+                " check_out_at, created_at) VALUES (CAST(:e AS uuid), :d, :q, :r, :o, :n)"
+                " RETURNING *"
             ),
             {
                 "e": employee_id,
                 "d": body.work_date,
                 "q": body.requested,
                 "r": body.reason,
+                "o": left_at,
                 "n": clock(),
             },
         )
@@ -189,7 +252,11 @@ def raise_correction(
         action="ATTENDANCE_CORRECTION_RAISED",
         entity_type="employee",
         entity_id=employee_id,
-        changes={"workDate": body.work_date.isoformat(), "requested": body.requested},
+        changes={
+            "workDate": body.work_date.isoformat(),
+            "requested": body.requested,
+            "checkOutAt": left_at.isoformat() if left_at else None,
+        },
         request=request,
     )
     return _view(row)
@@ -347,8 +414,8 @@ def decide_correction(
     row = (
         conn.execute(
             text(
-                "SELECT employee_id, status, work_date, requested FROM hr.attendance_correction"
-                " WHERE correction_id = CAST(:c AS uuid) FOR UPDATE"
+                "SELECT employee_id, status, work_date, requested, check_out_at"
+                " FROM hr.attendance_correction WHERE correction_id = CAST(:c AS uuid) FOR UPDATE"
             ),
             {"c": cid},
         )
@@ -366,6 +433,30 @@ def decide_correction(
     if body.decision == "REJECT" and not (body.note and body.note.strip()):
         raise ApiError(422, "APPROVAL_NOTE_REQUIRED", "Say why you are rejecting it.")
     status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
+    if status == "APPROVED" and row["requested"] == CHECK_OUT:
+        # The check-out is written to the day at the time asked, flagged as recorded from this
+        # approved correction. If the person has checked out since, there is nothing to record.
+        written = conn.execute(
+            text(
+                "UPDATE hr.attendance_day SET check_out_at = :o, updated_at = :n,"
+                " check_out_flags = CAST(:f AS jsonb)"
+                " WHERE employee_id = CAST(:e AS uuid) AND work_date = :d"
+                " AND check_in_at IS NOT NULL AND check_in_at < :o AND check_out_at IS NULL"
+            ),
+            {
+                "o": row["check_out_at"],
+                "n": now,
+                "f": f'["{CORRECTED_CHECK_OUT_FLAG}"]',
+                "e": employee_id,
+                "d": row["work_date"],
+            },
+        ).rowcount
+        if not written:
+            raise conflict(
+                "ATTENDANCE_ALREADY_CHECKED_OUT",
+                "This day already has a check-out, so there is nothing to record. Reject it, or ask"
+                " the employee to withdraw it.",
+            )
     conn.execute(
         text(
             "UPDATE hr.attendance_correction SET status = :s, decided_by = :u, decided_at = :n,"
@@ -389,6 +480,7 @@ def decide_correction(
             "correctionId": cid,
             "workDate": row["work_date"].isoformat(),
             "requested": row["requested"],
+            "checkOutAt": row["check_out_at"].isoformat() if row["check_out_at"] else None,
         },
         request=request,
     )

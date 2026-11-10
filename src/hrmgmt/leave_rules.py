@@ -239,6 +239,7 @@ def attendance_units(
             text(
                 "SELECT work_date, requested FROM hr.attendance_correction"
                 " WHERE employee_id = CAST(:e AS uuid) AND status = 'APPROVED'"
+                " AND requested IN ('FULL_DAY', 'HALF_DAY')"  # a check-out correction is a check-out
                 " AND (CAST(:a AS date) IS NULL OR work_date > :a) AND work_date < :b"
             ),
             {"e": employee_id, "a": after, "b": before},
