@@ -215,12 +215,14 @@ def _decide(
         cell.status = "OFF_DAY_WORKED" if cell.check_in_at else "OFF_DAY"
         return
     correction = cell.correction
-    if correction and correction["status"] == "APPROVED":
+    # An approved check-out correction has written the check-out: the day counts from it.
+    if correction and correction["status"] == "APPROVED" and correction["requested"] != "CHECK_OUT":
         cell.status = "CORRECTED"
         return
+    waiting = bool(correction and correction["status"] == "PENDING")
     if cell.check_in_at is not None:
         statuses = {e["status"] for e in cell.exceptions if e["kind"] in HALF_DAY_KINDS}
-        if "PENDING" in statuses or correction:
+        if "PENDING" in statuses or waiting:
             cell.status = "PENDING_APPROVAL"
         elif "REJECTED" in statuses:
             cell.status = "HALF_DAY"
@@ -232,7 +234,7 @@ def _decide(
     if cell.leave and not cell.leave["halfDay"]:
         cell.status = "LEAVE_APPROVED" if cell.leave["status"] == "APPROVED" else "LEAVE_APPLIED"
         return
-    if correction:
+    if waiting:
         cell.status = "PENDING_APPROVAL"
         return
     if day > today:

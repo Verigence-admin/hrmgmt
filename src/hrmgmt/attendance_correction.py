@@ -13,7 +13,14 @@ what was agreed.
 What can be corrected: a past working day (not a Sunday, a declared holiday or a day of approved
 full-day leave), on or after joining, in the current calendar month (product owner 7 Nov 2026), before that month's
 payroll has gone past draft, and only when the day does not already count in full (no check-in,
-no check-out, or a rejected exception). One pending or approved correction per day."""
+no check-out, or a rejected exception). One pending or approved correction per day.
+
+A MISSED CHECK-OUT (product owner, 10 Nov 2026): someone who checked in but could not check out --
+today or an earlier day of this month -- asks for the check-out to be recorded at the time they
+left (CHECK_OUT, with that time). Once the Team Lead or Project Manager approves it, the check-out
+is written to the day at that time, flagged as recorded from an approved correction (no photo, no
+location), and the day counts like any other from then on. It does not say what the day counts, so
+it is never one of the approved values below."""
 
 from __future__ import annotations
 
@@ -25,7 +32,12 @@ from sqlalchemy import Connection, text
 
 FULL_DAY = "FULL_DAY"
 HALF_DAY = "HALF_DAY"
+CHECK_OUT = "CHECK_OUT"
 VALUES = {FULL_DAY: Decimal(1), HALF_DAY: Decimal("0.5")}
+# The kinds that say what a day counts (CHECK_OUT records the check-out instead).
+DAY_COUNT_KINDS = (FULL_DAY, HALF_DAY)
+# The flag on a check-out recorded from an approved correction.
+CORRECTED_CHECK_OUT_FLAG = "APPROVED_CORRECTION"
 
 
 def approved_values(
@@ -38,9 +50,9 @@ def approved_values(
             text(
                 "SELECT work_date, requested FROM hr.attendance_correction"
                 " WHERE employee_id = CAST(:e AS uuid) AND status = 'APPROVED'"
-                " AND work_date >= :a AND work_date <= :b"
+                " AND requested = ANY(:k) AND work_date >= :a AND work_date <= :b"
             ),
-            {"e": employee_id, "a": first, "b": last},
+            {"e": employee_id, "a": first, "b": last, "k": list(DAY_COUNT_KINDS)},
         )
     }
 
@@ -52,7 +64,7 @@ def live_by_day(
     out: dict[tuple[str, date], dict[str, Any]] = {}
     for r in conn.execute(
         text(
-            "SELECT correction_id, employee_id, work_date, requested, reason, status"
+            "SELECT correction_id, employee_id, work_date, requested, reason, status, check_out_at"
             " FROM hr.attendance_correction WHERE status IN ('PENDING', 'APPROVED')"
             " AND work_date >= :a AND work_date <= :b"
         ),
@@ -63,6 +75,7 @@ def live_by_day(
             "requested": r["requested"],
             "reason": r["reason"],
             "status": r["status"],
+            "checkOutAt": r["check_out_at"].isoformat() if r["check_out_at"] else None,
         }
     return out
 

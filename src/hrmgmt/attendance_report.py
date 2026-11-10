@@ -386,6 +386,12 @@ def _apply_correction(row: Row, correction: dict[str, Any] | None) -> None:
             "side": None,
         }
     )
+    if correction["requested"] == "CHECK_OUT":
+        # A missed check-out: once approved the check-out is on the day itself, so the row stands
+        # as computed from it; while it waits, the day waits.
+        if correction["status"] == "PENDING" and row.status in ("MISSING_CHECK_OUT", "CHECKED_IN"):
+            row.status = "PENDING_APPROVAL"
+        return
     if correction["status"] == "APPROVED":
         row.delinquencies = [d for d in row.delinquencies if d["code"] != "ABSENT"]
         row.status = "CORRECTED"
