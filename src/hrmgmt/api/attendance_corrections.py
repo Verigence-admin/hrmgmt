@@ -12,10 +12,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Connection, text
 
 from hrmgmt import holidays as hol
+from hrmgmt import leave_rules as lr
 from hrmgmt import settings_store as cfg
 from hrmgmt.api.attendance import day_kind, get_clock
 from hrmgmt.api.employees import _own_employee_id, _uuid
 from hrmgmt.approvals import decides_attendance
+from hrmgmt.attendance_calendar import weekly_hours
 from hrmgmt.attendance_correction import CHECK_OUT, CORRECTED_CHECK_OUT_FLAG
 from hrmgmt.attendance_grace import HALF_DAY_KINDS
 from hrmgmt.audit import record_audit
@@ -376,21 +378,27 @@ def correction_approvals(
     )
     decides: dict[str, bool] = {}
     items = []
+    today = ist_date(now)
+    values = cfg.load_all(conn) if status == "PENDING" else {}
     for r in rows:
         eid = str(r["employee_id"])
         if eid not in decides:
             decides[eid] = decides_attendance(conn, authorizer, user, eid, now)
         if not decides[eid]:
             continue
-        items.append(
-            {
-                **_view(r),
-                "employeeId": eid,
-                "employeeName": r["full_name"],
-                "employeeCode": r["employee_code"],
-                "day": _day_facts(conn, eid, r["work_date"]),
-            }
-        )
+        item = {
+            **_view(r),
+            "employeeId": eid,
+            "employeeName": r["full_name"],
+            "employeeCode": r["employee_code"],
+            "day": _day_facts(conn, eid, r["work_date"]),
+        }
+        if status == "PENDING":
+            # The person's record with the request (product owner, 12 Nov 2026): leave taken in
+            # the 4 weeks before the day asked about, and the average hours a week over 6 weeks.
+            item["recentLeave"] = lr.recent_leave(conn, eid, r["work_date"], today)
+            item["weeklyHours"] = weekly_hours(conn, eid, r["work_date"], now=now, values=values)
+        items.append(item)
     return {"items": items}
 
 

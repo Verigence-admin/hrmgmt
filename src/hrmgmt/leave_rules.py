@@ -501,15 +501,17 @@ def balances(
     return out
 
 
-# ---- leave taken recently (product owner, 7 Nov 2026) -----------------------------------------
+# ---- leave taken recently (product owner, 7 Nov 2026; 4 weeks since 12 Nov 2026) -------------
 
-RECENT_WINDOW_DAYS = 42
+# 12 Nov 2026: "when approval goes, it should have record how many leaves a person has took in
+# last 4 weeks" (was 6 weeks). The employee applying sees the same figure as the approver.
+RECENT_WINDOW_DAYS = 28
 # Paid: from a balance, legacy SICK and EARNED included. Unpaid: UNPAID.
 PAID_TAKEN = ("PAID", "SPECIAL", "COMP_OFF", "SICK", "EARNED")
 
 
 def recent_leave(conn: Connection, employee_id: str, before: date, today: date) -> dict[str, Any]:
-    """Approved paid and unpaid leave days already taken in the 6 weeks (42 days) ending the day
+    """Approved paid and unpaid leave days already taken in the 4 weeks (28 days) ending the day
     before `before` (a request's from date) or yesterday, whichever is earlier, so approved future
     leave is not counted as taken. Counted like any leave day: Sundays and the person's holidays
     left out, a half day 0.5, a day on a half-day holiday at most 0.5. Only days inside count."""

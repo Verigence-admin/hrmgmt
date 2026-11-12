@@ -259,6 +259,43 @@ def week_minutes(by_day: dict[date, Cell], start: date) -> int:
     )
 
 
+# Product owner, 12 Nov 2026: with every approval, "how much is the average working hours per week
+# for last 6 weeks".
+HOURS_WINDOW_WEEKS = 6
+
+
+def weekly_hours(
+    conn: Connection, employee_id: str, before: date, *, now: datetime, values: dict[str, Any]
+) -> dict[str, Any]:
+    """The average hours a week over the 6 whole weeks (Monday to Sunday) before the week holding
+    `before` (a request's date) or today, whichever is earlier, so a week still running never
+    pulls the average down. Hours are check-out minus check-in, as on the calendar. Weeks wholly
+    before the person joined are left out; ``averageHours`` is None when none is left."""
+    today = ist_date(now)
+    last = week_start(min(before, today)) - timedelta(days=1)
+    first = last - timedelta(days=7 * HOURS_WINDOW_WEEKS - 1)
+    joined = conn.execute(
+        text("SELECT date_of_joining FROM hr.employee WHERE employee_id = CAST(:e AS uuid)"),
+        {"e": employee_id},
+    ).scalar()
+    by_day = cells(conn, [employee_id], first, last, now=now, values=values).get(employee_id, {})
+    weeks: list[dict[str, Any]] = []
+    start = first
+    while start <= last:
+        if not isinstance(joined, date) or start + timedelta(days=6) >= joined:
+            minutes = week_minutes(by_day, start)
+            weeks.append({"weekStart": start.isoformat(), "hours": round(minutes / 60, 1)})
+        start += timedelta(days=7)
+    total = sum(w["hours"] for w in weeks)
+    return {
+        "windowFrom": first.isoformat(),
+        "windowTo": last.isoformat(),
+        "weeks": len(weeks),
+        "averageHours": round(total / len(weeks), 1) if weeks else None,
+        "byWeek": weeks,
+    }
+
+
 def employee_calendar(
     conn: Connection, employee_id: str, month_first: date, *, now: datetime, values: dict[str, Any]
 ) -> dict[str, Any]:

@@ -899,14 +899,14 @@ def approved(world: World, eid: str, leave_type: str, first: date, last: date, h
         )
 
 
-def test_recent_leave_counts_approved_paid_and_unpaid_days_in_the_six_weeks_before(world):
+def test_recent_leave_counts_approved_paid_and_unpaid_days_in_the_four_weeks_before(world):
     eid, pc, tl = pc_with_lead(world)
     half(world, "AFTERNOON", day=date(2026, 11, 3), name="Eve")
     approved(world, eid, "PAID", date(2026, 11, 2), date(2026, 11, 4))  # Mon-Wed, Tue half off
     approved(world, eid, "UNPAID", date(2026, 11, 6), date(2026, 11, 6), half=True)
     approved(
-        world, eid, "SPECIAL", date(2026, 9, 26), date(2026, 9, 29)
-    )  # Sat-Tue; window from 28 Sep
+        world, eid, "SPECIAL", date(2026, 10, 10), date(2026, 10, 13)
+    )  # Sat-Tue; window from 12 Oct
     approved(world, eid, "UNPAID", date(2026, 11, 7), date(2026, 11, 8))  # Sat, Sun off
     approved(world, eid, "SICK", date(2026, 9, 1), date(2026, 9, 2))  # before the window
     with world.engine.begin() as conn:
@@ -928,7 +928,7 @@ def test_recent_leave_counts_approved_paid_and_unpaid_days_in_the_six_weeks_befo
     with world.engine.connect() as conn:
         recent = lr.recent_leave(conn, eid, date(2026, 11, 9), date(2026, 11, 9))
     assert recent == {
-        "windowFrom": "2026-09-28",
+        "windowFrom": "2026-10-12",
         "windowTo": "2026-11-08",
         "paidDays": 4.5,  # 2.5 (the half-day holiday counts half) + 2 special in the window
         "unpaidDays": 1.5,  # a half day + Saturday (Sunday left out); pending ones never count

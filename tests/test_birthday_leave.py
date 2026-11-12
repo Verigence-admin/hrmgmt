@@ -199,7 +199,7 @@ def test_recent_leave_counts_only_days_already_taken(world):
     ).json()
     # ends yesterday (8 Nov), not the day before the leave: 20 Nov is approved but not yet taken
     assert later == {
-        "windowFrom": "2026-09-28",
+        "windowFrom": "2026-10-12",
         "windowTo": "2026-11-08",
         "paidDays": 0.0,
         "unpaidDays": 2.0,

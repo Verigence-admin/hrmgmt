@@ -11,9 +11,11 @@ from sqlalchemy import Connection, text
 from hrmgmt import holidays as hol
 from hrmgmt import leave_rules as lr
 from hrmgmt import permissions as perm
+from hrmgmt import settings_store as cfg
 from hrmgmt.api.attendance import get_clock
 from hrmgmt.api.employees import _own_employee_id, _uuid
 from hrmgmt.approvals import decides_leave, leave_rule
+from hrmgmt.attendance_calendar import weekly_hours
 from hrmgmt.audit import record_audit
 from hrmgmt.authz import Authorizer
 from hrmgmt.db import get_conn
@@ -317,8 +319,8 @@ def my_recent_leave(
     clock: Clock = Depends(get_clock),
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    """While applying: paid and unpaid leave days approved in the 6 weeks before the chosen from
-    date (product owner, 7 Nov 2026). The approver sees the same numbers with the request."""
+    """While applying: paid and unpaid leave days approved in the 4 weeks before the chosen from
+    date (product owner, 7 and 12 Nov 2026). The approver sees the same numbers with the request."""
     return lr.recent_leave(conn, _own_employee_id(conn, user), from_date, ist_date(clock()))
 
 
@@ -407,6 +409,7 @@ def leave_approvals(
     )
     items = []
     today = ist_date(now)
+    values = cfg.load_all(conn) if status == "PENDING" else {}
     for r in rows:
         if decides_leave(conn, authorizer, user, str(r["employee_id"]), r["approver_rule"], now):
             item = {
@@ -425,8 +428,12 @@ def leave_approvals(
                 item["coverWarnings"] = cover_warnings(
                     conn, eid, r["from_date"], r["to_date"], r["half_day"], now
                 )
-                # Leave taken in the 6 weeks before this request's from date (7 Nov 2026).
+                # The person's record with the request (12 Nov 2026): leave taken in the 4 weeks
+                # before it, and the average hours a week over the 6 weeks before it.
                 item["recentLeave"] = lr.recent_leave(conn, eid, r["from_date"], today)
+                item["weeklyHours"] = weekly_hours(
+                    conn, eid, r["from_date"], now=now, values=values
+                )
             items.append(item)
     return {"items": items}
 

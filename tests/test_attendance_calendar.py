@@ -244,3 +244,68 @@ def test_a_lead_sees_the_calendar_of_their_people_only(world):
         ).status_code
         == 403
     )
+
+
+# ---- the person's record with an approval (product owner, 12 Nov 2026) ------------------------
+
+
+def test_an_approval_carries_the_average_hours_a_week_over_the_six_weeks_before(world):
+    """ "When approval goes, it should have record how many leaves a person has took in last 4 weeks
+    and how much is the average working hours per week for last 6 weeks"."""
+    from datetime import date
+
+    from hrmgmt import settings_store as cfg
+    from hrmgmt.attendance_calendar import weekly_hours
+
+    emp, pc, tl, *_ = lead_team(world)
+    eid = emp["employeeId"]
+    with world.engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE hr.employee SET date_of_joining = '2026-09-01' WHERE employee_id = CAST(:e AS uuid)"
+            ),
+            {"e": eid},
+        )
+    worked(world, pc, ist(2026, 10, 5, 10, 0), ist(2026, 10, 5, 18, 0))  # 8 h, week of 5 Oct
+    worked(world, pc, ist(2026, 10, 6, 10, 0), ist(2026, 10, 6, 16, 0))  # 6 h, same week
+    worked(world, pc, ist(2026, 11, 2, 10, 0), ist(2026, 11, 2, 19, 0))  # 9 h, week of 2 Nov
+    worked(world, pc, ist(2026, 11, 9, 10, 0), ist(2026, 11, 9, 18, 0))  # this week: not counted
+    world.clock.set(ist(2026, 11, 10, 12, 0))
+    with world.engine.connect() as conn:
+        hours = weekly_hours(
+            conn, eid, date(2026, 11, 20), now=world.clock(), values=cfg.load_all(conn)
+        )
+    assert (hours["windowFrom"], hours["windowTo"], hours["weeks"]) == (
+        "2026-09-28",
+        "2026-11-08",
+        6,
+    )
+    assert [w["hours"] for w in hours["byWeek"]] == [0.0, 14.0, 0.0, 0.0, 0.0, 9.0]
+    assert hours["averageHours"] == 3.8  # 23 h over 6 weeks
+    # A new joiner: only the weeks from joining count.
+    with world.engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE hr.employee SET date_of_joining = '2026-10-29' WHERE employee_id = CAST(:e AS uuid)"
+            ),
+            {"e": eid},
+        )
+    with world.engine.connect() as conn:
+        joiner = weekly_hours(
+            conn, eid, date(2026, 11, 20), now=world.clock(), values=cfg.load_all(conn)
+        )
+    assert joiner["weeks"] == 2 and joiner["averageHours"] == 4.5
+    # The approver sees both figures with a correction request (and with a leave request: the
+    # same two calls in leave_approvals).
+    raised = world.client.post(
+        "/hr/v1/attendance/corrections",
+        json={"workDate": "2026-11-04", "requested": "FULL_DAY", "reason": "At the outlet all day"},
+        headers=world.headers(pc),
+    )
+    assert raised.status_code == 200, raised.text
+    items = world.client.get(
+        "/hr/v1/approvals/attendance-corrections", headers=world.headers(tl)
+    ).json()["items"]
+    [mine] = [i for i in items if i["employeeId"] == eid]
+    assert mine["weeklyHours"]["windowTo"] == "2026-11-01"  # the 6 whole weeks before 4 Nov's week
+    assert mine["recentLeave"]["windowFrom"] == "2026-10-07"  # the 4 weeks before 4 Nov
