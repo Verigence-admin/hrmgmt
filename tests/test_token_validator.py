@@ -54,7 +54,8 @@ def test_valid_human_token():
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"exp": int(time.time()) - 10},
+        {"exp": int(time.time()) - 120},
+        {"iat": int(time.time()) + 300},
         {"aud": "someone-else"},
         {"iss": "someone-else"},
         {"actor_type": "SERVICE_INTEGRATION"},
@@ -73,3 +74,11 @@ def test_rejected_tokens(overrides):
 def test_garbage_token_rejected():
     with pytest.raises(TokenError):
         _validator().validate_human("not-a-jwt")
+
+
+def test_a_token_issued_by_a_clock_running_ahead_is_accepted():
+    """12 Nov 2026: the HR host ran ~15 s behind Security, so a just-issued token looked like it
+    came from the future and the first /me after every sign-in was refused (My HR disappeared)."""
+    now = int(time.time())
+    token = _token(iat=now + 15, exp=now + 915)
+    assert _validator().validate_human(token) == HumanPrincipal(user_id="user-1")
