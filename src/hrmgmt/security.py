@@ -29,6 +29,12 @@ _JWKS_REQUEST_TIMEOUT_SECONDS = 5.0
 # live Security decision, so a token carrying any of these is refused outright.
 _FORBIDDEN_AUTHORITY_CLAIMS = frozenset({"tenant_id", "permissions", "roles", "location_id", "act"})
 
+# Allowance for the clocks of Security and this service disagreeing. Without it a token issued a
+# moment ago is "not yet valid (iat)" wherever this service's clock runs behind Security's: on
+# 12 Nov 2026 the HR host ran about 15 seconds behind, every new sign-in's first /me was refused
+# with 401, and the app hid My HR (no attendance) for those people.
+CLOCK_SKEW_LEEWAY_SECONDS = 60
+
 
 class SecurityTokenValidator:
     def __init__(
@@ -58,6 +64,7 @@ class SecurityTokenValidator:
                 algorithms=[signing_key.algorithm_name],
                 issuer=self._issuer,
                 audience=self._audience,
+                leeway=CLOCK_SKEW_LEEWAY_SECONDS,
                 options={"require": ["exp", "iss", "aud", "sub", "iat", "jti", "actor_type"]},
             )
         except PyJWKClientConnectionError as exc:
