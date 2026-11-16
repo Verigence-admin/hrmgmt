@@ -305,3 +305,20 @@ OUTLET = ("Cuttack Motors", 20.4625, 85.8828)
 NEAR = (20.4630, 85.8830)  # about 60 m away
 FAR = (20.5500, 85.9500)  # roughly 12 km away
 __all__ = ["FAR", "NEAR", "OUTLET", "World", "ist", "jpeg", "timedelta"]
+
+
+def without_month_limits(engine) -> None:
+    """Sets the monthly attendance limits (hrmgmt.attendance_month) out of reach, for tests about
+    something else in which one short or late day would otherwise pass them."""
+    with engine.begin() as conn:
+        for key, value in (
+            ("attendance.escalate_average_hours_below", "1"),
+            ("attendance.escalate_late_early_hours", "100"),
+        ):
+            conn.execute(
+                text(
+                    "INSERT INTO hr.setting (key, value) VALUES (:k, CAST(:v AS jsonb))"
+                    " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+                ),
+                {"k": key, "v": value},
+            )

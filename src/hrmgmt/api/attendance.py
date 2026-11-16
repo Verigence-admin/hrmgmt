@@ -23,6 +23,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Connection, text
 
+from hrmgmt import attendance_month as am
 from hrmgmt import holidays as hol
 from hrmgmt import permissions as perm
 from hrmgmt import settings_store as cfg
@@ -559,6 +560,17 @@ def _record_event(
                 "c": comp_off,
             },
         )
+    if background is not None and not off_day and (event == "CHECK_OUT" or "LATE" in flags):
+        # The month may have passed an attendance limit with this punch: the person is told once
+        # a month, after the answer goes back (product owner, 16 Nov 2026).
+        escalation = am.record_escalation(conn, employee_id, work_date, now)
+        if escalation is not None:
+            background.add_task(
+                am.notify_employee,
+                escalation,
+                provisioner=getattr(request.app.state, "provisioner", None),
+                mailer=getattr(request.app.state, "mailer", None),
+            )
     if short_day.KIND in kinds and background is not None and day is not None:
         notice = short_day.build_notice(
             conn,
@@ -630,6 +642,7 @@ async def _read(file: UploadFile) -> bytes:
 @router.post("/attendance/check-in")
 async def check_in(
     request: Request,
+    background: BackgroundTasks,
     photo: UploadFile = File(...),
     token: str = Form(..., max_length=100),
     latitude: float = Form(...),
@@ -659,6 +672,7 @@ async def check_in(
         geocoder=geocoder,
         conn=conn,
         data=await _read(photo),
+        background=background,
     )
 
 
@@ -1193,16 +1207,23 @@ def pending_attendance_exceptions(
         .mappings()
         .all()
     )
-    decides: dict[str, bool] = {}
+    # When the person's month has passed an attendance limit, only a Project Manager or Executive
+    # decides (hrmgmt.attendance_month); each request says why.
+    stats = am.StatsCache(conn, now)
+    decides: dict[tuple[str, bool], bool] = {}
     items = []
     for r in rows:
         eid = str(r["employee_id"])
-        if eid not in decides:
-            decides[eid] = decides_attendance(conn, authorizer, user, eid, now)
+        month = stats.get(eid, r["work_date"])
+        key = (eid, month.escalated)
+        if key not in decides:
+            decides[key] = decides_attendance(
+                conn, authorizer, user, eid, now, escalated=month.escalated
+            )
         if r["kind"] == "NO_OUTLET_LOCATION":
             if not decides_attendance(conn, authorizer, user, eid, now, r["kind"]):
                 continue
-        elif not decides[eid]:
+        elif not decides[key]:
             continue
         side = "check_in" if r["event"] == "CHECK_IN" else "check_out"
         items.append(
@@ -1226,6 +1247,8 @@ def pending_attendance_exceptions(
                 "grace": grace_view(conn, eid, r["work_date"], str(r["exception_id"]))
                 if r["kind"] in LATE_EARLY
                 else None,
+                "monthStats": month.view(),
+                "approvalNote": month.note() if r["kind"] != "NO_OUTLET_LOCATION" else None,
             }
         )
     return {"items": items}
@@ -1264,8 +1287,19 @@ def decide_attendance_exception(
     if row is None:
         raise not_found("Request not found.")
     employee_id = str(row["employee_id"])
+    escalated = (
+        row["kind"] != "NO_OUTLET_LOCATION"
+        and am.month_stats(conn, employee_id, row["work_date"], clock()).escalated
+    )
     if not decides_attendance(
-        conn, authorizer, user, employee_id, clock(), row["kind"], hr_override=True
+        conn,
+        authorizer,
+        user,
+        employee_id,
+        clock(),
+        row["kind"],
+        hr_override=True,
+        escalated=escalated,
     ):
         raise not_found("Request not found.")  # not shown to anyone who may not decide it
     if row["status"] != "PENDING":

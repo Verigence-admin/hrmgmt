@@ -35,14 +35,15 @@ def grace_allowed(conn: Connection) -> int:
 
 
 def late_early_in_month(conn: Connection, employee_id: str, day: date) -> list[str]:
-    """Every late check-in and early check-out of the month, oldest first, whatever its status."""
+    """Every late check-in and early check-out of the month, oldest first, whatever its status,
+    except one an approved time correction has resolved (the person was not late or early)."""
     start, end = month_bounds(day)
     return [
         str(r[0])
         for r in conn.execute(
             text(
                 "SELECT exception_id FROM hr.attendance_exception"
-                " WHERE employee_id = CAST(:e AS uuid) AND kind = ANY(:k)"
+                " WHERE employee_id = CAST(:e AS uuid) AND kind = ANY(:k) AND status <> 'RESOLVED'"
                 " AND work_date >= :a AND work_date < :b ORDER BY work_date, created_at, exception_id"
             ),
             {"e": employee_id, "k": list(LATE_EARLY), "a": start, "b": end},
@@ -68,7 +69,8 @@ def beyond_grace(conn: Connection, employee_id: str, month: date) -> int:
 
 def half_days(conn: Connection, employee_id: str, month: date) -> Decimal:
     """0.5 for every day of the month with a rejected late, early, out-of-fence or short-day
-    exception, unless an approved attendance correction says what that day counts."""
+    exception, unless an approved attendance correction says what that day counts (a full or half
+    day; a time correction that answers the exception resolves it instead)."""
     start, end = month_bounds(month)
     count = conn.execute(
         text(
@@ -77,7 +79,7 @@ def half_days(conn: Connection, employee_id: str, month: date) -> Decimal:
             " AND x.work_date >= :a AND x.work_date < :b"
             " AND NOT EXISTS (SELECT 1 FROM hr.attendance_correction c"
             "   WHERE c.employee_id = x.employee_id AND c.work_date = x.work_date"
-            "   AND c.status = 'APPROVED')"
+            "   AND c.status = 'APPROVED' AND c.requested IN ('FULL_DAY', 'HALF_DAY'))"
         ),
         {"e": employee_id, "k": list(HALF_DAY_KINDS), "a": start, "b": end},
     ).scalar_one()

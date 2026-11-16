@@ -18,6 +18,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import Connection, text
 
+from hrmgmt import attendance_month as am
 from hrmgmt import permissions as perm
 from hrmgmt.api.attendance import get_clock
 from hrmgmt.approvals import is_ceo
@@ -77,14 +78,21 @@ def _current_assignments(conn: Connection, now: datetime) -> list[Any]:
     )
 
 
-def _pending_items(conn: Connection) -> list[dict[str, Any]]:
-    """Everything a Team Lead or Project Manager decides that is still waiting."""
+def _pending_items(conn: Connection, now: datetime) -> list[dict[str, Any]]:
+    """Everything a Team Lead or Project Manager decides that is still waiting. The attendance
+    requests of a person whose month has passed an attendance limit wait with the Project Managers
+    only (hrmgmt.attendance_month), so they never count against a Team Lead."""
     items: list[dict[str, Any]] = []
+    stats = am.StatsCache(conn, now)
+
+    def attendance_roles(employee_id: Any, day: Any) -> tuple[str, ...]:
+        return ("PM",) if stats.get(str(employee_id), day).escalated else _APPROVER_ROLES
+
     for r in conn.execute(
         text(
             """
             SELECT x.exception_id, x.kind, x.work_date, x.created_at, e.security_user_id,
-                   e.full_name, e.employee_code
+                   e.full_name, e.employee_code, x.employee_id
             FROM hr.attendance_exception x JOIN hr.employee e ON e.employee_id = x.employee_id
             WHERE x.status = 'PENDING' AND x.kind <> 'NO_OUTLET_LOCATION'
             """
@@ -100,7 +108,7 @@ def _pending_items(conn: Connection) -> list[dict[str, Any]]:
                 "employeeUser": str(r[4]) if r[4] else None,
                 "employeeName": r[5],
                 "employeeCode": r[6],
-                "roles": _APPROVER_ROLES,
+                "roles": attendance_roles(r[7], r[2]),
             }
         )
     # An attendance correction is an attendance request: it waits with the same people and counts
@@ -109,7 +117,7 @@ def _pending_items(conn: Connection) -> list[dict[str, Any]]:
         text(
             """
             SELECT c.correction_id, c.requested, c.work_date, c.created_at, e.security_user_id,
-                   e.full_name, e.employee_code
+                   e.full_name, e.employee_code, c.employee_id
             FROM hr.attendance_correction c JOIN hr.employee e ON e.employee_id = c.employee_id
             WHERE c.status = 'PENDING'
             """
@@ -125,7 +133,7 @@ def _pending_items(conn: Connection) -> list[dict[str, Any]]:
                 "employeeUser": str(r[4]) if r[4] else None,
                 "employeeName": r[5],
                 "employeeCode": r[6],
-                "roles": _APPROVER_ROLES,
+                "roles": attendance_roles(r[7], r[2]),
             }
         )
     for r in conn.execute(
@@ -238,7 +246,7 @@ def _build(
         }
     unassigned: list[dict[str, Any]] = []
     by_approver: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for item in _pending_items(conn):
+    for item in _pending_items(conn, now):
         user = item["employeeUser"]
         tenants = tenants_of.get(user, set()) if user else set()
         if scope is not None and not tenants:
