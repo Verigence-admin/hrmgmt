@@ -39,9 +39,10 @@ def decides_attendance(
     """`hr_override` lets HR decide any person's exception (never their own), for when HR opens a
     person's day and acts on it; the approvals lists never pass it.
 
-    `escalated`: the person's month has passed an attendance limit (hrmgmt.attendance_month), so
-    only a Project Manager or Executive of their project decides, not a Team Lead (product owner,
-    16 Nov 2026). The CEO still may; HR decides when the project has neither."""
+    `escalated`: the person is a Team Lead, or their month has passed the late/early limit
+    (hrmgmt.attendance_month.approval_route), so only a Project Manager or Executive of their
+    project decides, not a Team Lead (product owner, 16 Nov 2026). The CEO still may; HR decides
+    when the project has neither."""
     employee_user = wc.employee_user_id(conn, employee_id)
     if employee_user is not None and employee_user == actor.user_id:
         return False

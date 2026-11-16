@@ -495,8 +495,7 @@ def raise_correction(
         request=request,
     )
     view = _view(row)
-    stats = am.month_stats(conn, employee_id, body.work_date, now)
-    view["approvalNote"] = stats.note()
+    view["approvalNote"] = am.StatsCache(conn, now).route(employee_id, body.work_date).note
     return view
 
 
@@ -520,7 +519,7 @@ def my_corrections(
         item = _view(r)
         # A waiting request says when only a Project Manager or Executive can approve it.
         item["approvalNote"] = (
-            stats.get(employee_id, r["work_date"]).note() if r["status"] == "PENDING" else None
+            stats.route(employee_id, r["work_date"]).note if r["status"] == "PENDING" else None
         )
         items.append(item)
     return {"items": items}
@@ -617,8 +616,8 @@ def correction_approvals(
     clock: Clock = Depends(get_clock),
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    """Correction requests this person may decide on. When the person's month has passed an
-    attendance limit, only a Project Manager or Executive sees it (hrmgmt.attendance_month)."""
+    """Correction requests this person may decide on. A Team Lead's own, and those of a month past
+    the late/early limit, only a Project Manager or Executive sees (hrmgmt.attendance_month)."""
     now = clock()
     rows = (
         conn.execute(
@@ -640,10 +639,11 @@ def correction_approvals(
     for r in rows:
         eid = str(r["employee_id"])
         month = stats.get(eid, r["work_date"])
-        key = (eid, month.escalated)
+        route = stats.route(eid, r["work_date"])
+        key = (eid, route.pm_only)
         if key not in decides:
             decides[key] = decides_attendance(
-                conn, authorizer, user, eid, now, escalated=month.escalated
+                conn, authorizer, user, eid, now, escalated=route.pm_only
             )
         if not decides[key]:
             continue
@@ -654,7 +654,7 @@ def correction_approvals(
             "employeeCode": r["employee_code"],
             "day": _day_facts(conn, eid, r["work_date"]),
             "monthStats": month.view(),
-            "approvalNote": month.note(),
+            "approvalNote": route.note,
         }
         if status == "PENDING":
             # The person's record with the request (product owner, 12 Nov 2026): leave taken in
@@ -699,7 +699,7 @@ def decide_correction(
         raise not_found("Request not found.")
     employee_id = str(row["employee_id"])
     now: datetime = clock()
-    escalated = am.month_stats(conn, employee_id, row["work_date"], now).escalated
+    escalated = am.StatsCache(conn, now).route(employee_id, row["work_date"]).pm_only
     if not decides_attendance(
         conn, authorizer, user, employee_id, now, hr_override=True, escalated=escalated
     ):

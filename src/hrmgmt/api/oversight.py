@@ -79,14 +79,14 @@ def _current_assignments(conn: Connection, now: datetime) -> list[Any]:
 
 
 def _pending_items(conn: Connection, now: datetime) -> list[dict[str, Any]]:
-    """Everything a Team Lead or Project Manager decides that is still waiting. The attendance
-    requests of a person whose month has passed an attendance limit wait with the Project Managers
-    only (hrmgmt.attendance_month), so they never count against a Team Lead."""
+    """Everything a Team Lead or Project Manager decides that is still waiting. A Team Lead's own
+    attendance requests, and those of a month past the late/early limit, wait with the Project
+    Managers only (hrmgmt.attendance_month), so they never count against a Team Lead."""
     items: list[dict[str, Any]] = []
     stats = am.StatsCache(conn, now)
 
     def attendance_roles(employee_id: Any, day: Any) -> tuple[str, ...]:
-        return ("PM",) if stats.get(str(employee_id), day).escalated else _APPROVER_ROLES
+        return ("PM",) if stats.route(str(employee_id), day).pm_only else _APPROVER_ROLES
 
     for r in conn.execute(
         text(
