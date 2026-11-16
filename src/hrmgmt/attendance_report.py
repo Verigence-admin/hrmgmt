@@ -33,6 +33,8 @@ DELINQUENCY_LABELS = {
     "SHORT_DAY": "Fewer than the minimum hours",
     "CORRECTION_FULL_DAY": "Correction asked: full day",
     "CORRECTION_HALF_DAY": "Correction asked: half day",
+    "CORRECTION_CHECK_OUT": "Correction asked: record the check-out",
+    "CORRECTION_ADJUST": "Correction asked: check-in/check-out time or location",
 }
 # These three belong to one punch, so they say which: "No face found in the check-out photo".
 _PER_PUNCH = {
@@ -386,10 +388,14 @@ def _apply_correction(row: Row, correction: dict[str, Any] | None) -> None:
             "side": None,
         }
     )
-    if correction["requested"] == "CHECK_OUT":
-        # A missed check-out: once approved the check-out is on the day itself, so the row stands
-        # as computed from it; while it waits, the day waits.
-        if correction["status"] == "PENDING" and row.status in ("MISSING_CHECK_OUT", "CHECKED_IN"):
+    if correction["requested"] in ("CHECK_OUT", "ADJUST"):
+        # A missed check-out, or a time or location correction: once approved it is on the day
+        # itself, so the row stands as computed from it; while it waits, the day waits.
+        if correction["status"] == "PENDING" and row.status in (
+            "MISSING_CHECK_OUT",
+            "CHECKED_IN",
+            "EXCEPTION_REJECTED",
+        ):
             row.status = "PENDING_APPROVAL"
         return
     if correction["status"] == "APPROVED":

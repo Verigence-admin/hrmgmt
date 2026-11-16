@@ -20,7 +20,18 @@ today or an earlier day of this month -- asks for the check-out to be recorded a
 left (CHECK_OUT, with that time). Once the Team Lead or Project Manager approves it, the check-out
 is written to the day at that time, flagged as recorded from an approved correction (no photo, no
 location), and the day counts like any other from then on. It does not say what the day counts, so
-it is never one of the approved values below."""
+it is never one of the approved values below.
+
+A TIME OR LOCATION CORRECTION (product owner, 16 Nov 2026): someone who checked in asks for their
+check-in time to be earlier, their check-out time to be later (or a missing one recorded), or their
+check-in or check-out location to count as at their outlet (ADJUST, any of these together). Once the
+Team Lead or Project Manager approves it, the times are written to the day (flagged as from an
+approved correction; what was recorded before is kept on the correction), and a late, early,
+out-of-fence or short-day exception the correction answers becomes RESOLVED. Like a check-out, it
+does not say what the day counts.
+
+A day has at most one waiting correction, and at most one approved full or half day; approved time
+corrections may follow one another."""
 
 from __future__ import annotations
 
@@ -33,11 +44,17 @@ from sqlalchemy import Connection, text
 FULL_DAY = "FULL_DAY"
 HALF_DAY = "HALF_DAY"
 CHECK_OUT = "CHECK_OUT"
+ADJUST = "ADJUST"
+# The kinds that change the day's record rather than what it counts.
+RECORD_KINDS = (CHECK_OUT, ADJUST)
 VALUES = {FULL_DAY: Decimal(1), HALF_DAY: Decimal("0.5")}
 # The kinds that say what a day counts (CHECK_OUT records the check-out instead).
 DAY_COUNT_KINDS = (FULL_DAY, HALF_DAY)
-# The flag on a check-out recorded from an approved correction.
+# The flag on a check-in or check-out written from an approved correction.
 CORRECTED_CHECK_OUT_FLAG = "APPROVED_CORRECTION"
+CORRECTED_FLAG = CORRECTED_CHECK_OUT_FLAG
+# The flag on a side whose location an approved correction says was at the outlet.
+LOCATION_CORRECTED_FLAG = "LOCATION_CORRECTED"
 
 
 def approved_values(
@@ -60,13 +77,16 @@ def approved_values(
 def live_by_day(
     conn: Connection, first: date, last: date
 ) -> dict[tuple[str, date], dict[str, Any]]:
-    """(employee, day) -> the pending or approved correction, for the attendance views."""
+    """(employee, day) -> the pending or approved correction, for the attendance views. A waiting
+    one is shown before an approved one; an approved full or half day before a time correction."""
     out: dict[tuple[str, date], dict[str, Any]] = {}
     for r in conn.execute(
         text(
-            "SELECT correction_id, employee_id, work_date, requested, reason, status, check_out_at"
+            "SELECT correction_id, employee_id, work_date, requested, reason, status, check_out_at,"
+            " check_in_at, location_check_in, location_check_out"
             " FROM hr.attendance_correction WHERE status IN ('PENDING', 'APPROVED')"
             " AND work_date >= :a AND work_date <= :b"
+            " ORDER BY (status = 'PENDING'), (requested IN ('FULL_DAY', 'HALF_DAY')), created_at"
         ),
         {"a": first, "b": last},
     ).mappings():
@@ -76,6 +96,9 @@ def live_by_day(
             "reason": r["reason"],
             "status": r["status"],
             "checkOutAt": r["check_out_at"].isoformat() if r["check_out_at"] else None,
+            "checkInAt": r["check_in_at"].isoformat() if r["check_in_at"] else None,
+            "locationCheckIn": r["location_check_in"],
+            "locationCheckOut": r["location_check_out"],
         }
     return out
 

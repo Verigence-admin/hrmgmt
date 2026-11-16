@@ -13,7 +13,7 @@ from hrmgmt import attendance_grace as grace
 from hrmgmt import permissions as perm
 from hrmgmt.mailer import MailError
 from hrmgmt.provisioning import UserSummary
-from tests.support import World, ist
+from tests.support import World, ist, without_month_limits
 from tests.test_attendance import send, setup_pc, token
 
 
@@ -39,6 +39,7 @@ def world(migrated_engine):
         conn.execute(text("DELETE FROM hr.holiday WHERE status = 'DECLARED'"))
         conn.execute(text("DELETE FROM hr.setting"))
         conn.execute(text("DELETE FROM hr.message_log"))
+    without_month_limits(migrated_engine)
     w.mailer = FakeMailer()
     w.app.state.mailer = w.mailer
     return w

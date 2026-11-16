@@ -30,6 +30,7 @@ from sqlalchemy import Connection, text
 from hrmgmt import holidays as hol
 from hrmgmt.attendance_correction import live_by_day
 from hrmgmt.attendance_grace import HALF_DAY_KINDS
+from hrmgmt.attendance_month import month_stats
 from hrmgmt.leavers import after_last_day, last_days
 from hrmgmt.timeutil import ist_date, parse_hhmm
 
@@ -137,13 +138,13 @@ def cells(
     exceptions: dict[tuple[str, date], list[dict[str, Any]]] = defaultdict(list)
     for e in conn.execute(
         text(
-            "SELECT employee_id, work_date, kind, status FROM hr.attendance_exception"
+            "SELECT employee_id, work_date, kind, status, event FROM hr.attendance_exception"
             " WHERE employee_id = ANY(CAST(:ids AS uuid[])) AND work_date >= :a AND work_date <= :b"
             " ORDER BY created_at"
         ),
         p,
     ):
-        exceptions[(str(e[0]), e[1])].append({"kind": e[2], "status": e[3]})
+        exceptions[(str(e[0]), e[1])].append({"kind": e[2], "status": e[3], "event": e[4]})
     leave: dict[tuple[str, date], dict[str, Any]] = {}
     for r in conn.execute(
         text(
@@ -215,8 +216,16 @@ def _decide(
         cell.status = "OFF_DAY_WORKED" if cell.check_in_at else "OFF_DAY"
         return
     correction = cell.correction
-    # An approved check-out correction has written the check-out: the day counts from it.
-    if correction and correction["status"] == "APPROVED" and correction["requested"] != "CHECK_OUT":
+    # An approved check-out or time correction has written the day: the day counts from it.
+    if (
+        correction
+        and correction["status"] == "APPROVED"
+        and correction["requested"]
+        not in (
+            "CHECK_OUT",
+            "ADJUST",
+        )
+    ):
         cell.status = "CORRECTED"
         return
     waiting = bool(correction and correction["status"] == "PENDING")
@@ -324,6 +333,9 @@ def employee_calendar(
         counts[c.status] += 1
     return {
         "month": month_first.strftime("%Y-%m"),
+        # Late and early time, and the average hours a day, so far this month, with the limits
+        # (product owner, 16 Nov 2026).
+        "monthStats": month_stats(conn, employee_id, month_first, now, values).view(),
         "absentAfter": values["attendance.absent_after"],
         "minimumHours": int(values["attendance.min_work_hours"]),
         "totals": {

@@ -10,7 +10,16 @@ from sqlalchemy import text
 
 from hrmgmt import permissions as perm
 from hrmgmt.geo import haversine_m
-from tests.support import FAR, NEAR, OUTLET, World, assert_night_guarded, ist, jpeg
+from tests.support import (
+    FAR,
+    NEAR,
+    OUTLET,
+    World,
+    assert_night_guarded,
+    ist,
+    jpeg,
+    without_month_limits,
+)
 
 
 @pytest.fixture()
@@ -663,6 +672,7 @@ def test_every_employee_needs_a_location_even_with_no_project(world):
 
 
 def test_grace_is_shown_to_the_team_lead_and_counted_together_for_late_and_early(world):
+    without_month_limits(world.engine)
     _, pc, _ = setup_pc(world)
     hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
     _, tl = world.employee(hr)

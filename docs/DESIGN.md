@@ -388,3 +388,31 @@ configured nothing is checked.
 Guarded: attendance photo (`/attendance/{id}/photo/{event}`), the attendance Excel report, claim
 receipts, payslip PDFs and support-ticket files. Profile photos (`/employees/{id}/photo`,
 `/me/employee/photo`) are not guarded: they are the avatars the screens show, not downloads.
+
+## 33. Time and location corrections, and the monthly attendance limits (product owner, 16 November 2026)
+
+**Corrections.** Besides asking for a day to count as a full or half day, or for a missed check-out
+to be recorded, an employee can ask for a **time or location correction** (`ADJUST`) of a day
+with a check-in, today or earlier in the current month, before that month's payroll goes past
+draft: the check-in moved **earlier**, the check-out moved **later** (or recorded when missing),
+and/or the check-in or check-out location counted as at the outlet (only where it was flagged
+outside the fence). Once approved, the new times are written to the day, flagged
+`APPROVED_CORRECTION` (a location `LOCATION_CORRECTED`); what was recorded before is kept on the
+correction (`previousCheckInAt`, `previousCheckOutAt`). A late, early, out-of-fence or short-day
+exception the correction answers becomes `RESOLVED`: it no longer counts towards grace or as a
+half day. A day has at most one waiting correction and one approved full or half day; approved
+time corrections may follow one another.
+
+**Month figures.** For each person and month (to date): late check-ins (after the late-after time)
+and how late, measured from the standard check-in; early check-outs (before the earliest check-out)
+and how early, measured to the standard check-out; and the average hours a day over full working
+days with a check-in and check-out. Shown on the employee's calendar and with every attendance
+approval.
+
+**Limits.** Expected: `attendance.expected_daily_hours` (9) a day on average. When, in a month, the
+late and early time adds up to more than `attendance.escalate_late_early_hours` (10), or the average
+is below `attendance.escalate_average_hours_below` (7), that month's attendance requests
+(exceptions and corrections) can be decided only by a **Project Manager or Executive** of the
+person's project (the CEO always; HR when the project has neither). Each such request carries the
+note saying why, the person sees it on their own requests, and they are emailed once a month the
+first time it happens. These requests never count against a Team Lead at the Monday deadline.

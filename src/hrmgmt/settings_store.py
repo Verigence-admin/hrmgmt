@@ -61,6 +61,30 @@ SPECS: dict[str, Spec] = {
         "Least hours between check-in and check-out; a shorter day goes to the Team Lead and the Project Manager is told",
         "Attendance",
     ),
+    # Product owner, 16 Nov 2026: a person is expected to work 9 hours a day on average. Past either
+    # limit below in a month, their attendance requests of that month go to a Project Manager or
+    # Executive, not the Team Lead, and the person is told.
+    "attendance.expected_daily_hours": Spec(
+        "int", 9, 1, 14, "Hours a day each employee is expected to work on average", "Attendance"
+    ),
+    "attendance.escalate_late_early_hours": Spec(
+        "int",
+        10,
+        1,
+        100,
+        "Late check-ins and early check-outs adding up to more than these hours in a month: that"
+        " month's attendance requests go to a Project Manager or Executive",
+        "Attendance",
+    ),
+    "attendance.escalate_average_hours_below": Spec(
+        "int",
+        7,
+        1,
+        14,
+        "Average hours a day in a month below this: that month's attendance requests go to a"
+        " Project Manager or Executive",
+        "Attendance",
+    ),
     "attendance.geofence_radius_m": Spec(
         "int", 500, 50, 5000, "Geofence radius for PCs (metres)", "Attendance"
     ),

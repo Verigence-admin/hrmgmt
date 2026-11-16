@@ -13,7 +13,7 @@ from hrmgmt import attendance_grace as grace
 from hrmgmt import permissions as perm
 from hrmgmt.leave_rules import attendance_units
 from hrmgmt.payroll_data import present_days
-from tests.support import World, ist
+from tests.support import World, ist, without_month_limits
 from tests.test_attendance import send, setup_pc, token
 
 TODAY = ist(2026, 10, 9, 12, 0)  # a Friday
@@ -30,6 +30,7 @@ def world(migrated_engine):
         conn.execute(text("DELETE FROM hr.capture_token"))
         conn.execute(text("DELETE FROM hr.holiday WHERE status = 'DECLARED'"))
         conn.execute(text("DELETE FROM hr.setting"))
+    without_month_limits(migrated_engine)
     return w
 
 
