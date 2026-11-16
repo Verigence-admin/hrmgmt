@@ -4,14 +4,16 @@ the monthly limits that send requests to a Project Manager or Executive (product
 
 from __future__ import annotations
 
+import uuid
 from datetime import date, datetime
 
 import pytest
 from sqlalchemy import text
 
 from hrmgmt import attendance_grace as grace
+from hrmgmt import permissions as perm
 from hrmgmt.approver_deadline import overdue_team_leads
-from hrmgmt.attendance_month import month_stats
+from hrmgmt.attendance_month import TEAM_LEAD_NOTE, month_stats
 from hrmgmt.provisioning import UserSummary
 from hrmgmt.timeutil import IST
 from tests.support import FAR, World, ist, without_month_limits
@@ -375,28 +377,66 @@ def test_more_than_ten_hours_late_or_early_sends_requests_to_the_pm_or_executive
     assert decide(world, pm, c["correctionId"]).json()["status"] == "APPROVED"
 
 
-def test_an_average_below_seven_hours_sends_requests_to_the_pm(world):
+def test_a_low_average_alone_changes_nothing(world):
+    # Product owner, 16 Nov 2026: "remove average rule". The average is shown, not enforced.
     emp, pc, tl, pm, _ = team(world)
     for d in (5, 6):
         punch(world, pc, ist(2026, 10, d, 10, 30), ist(2026, 10, d, 17, 0))  # 6 h 30 m
     with world.engine.connect() as conn:
         stats = month_stats(conn, emp["employeeId"], date(2026, 10, 1), world.clock())
-    assert stats.reasons == ["LOW_AVERAGE"]
-    assert "the average is 6 h 30 m a day in October 2026 (less than 7 hours" in stats.note()
+    assert stats.view()["averageMinutes"] == 390
+    assert stats.reasons == [] and stats.note() is None
     world.clock.set(ist(2026, 10, 9, 12, 0))
-    asked = adjust(world, pc, "2026-10-06", checkOutTime="18:30")
-    assert asked.status_code == 200
-    assert (
-        world.client.get(
-            "/hr/v1/approvals/attendance-corrections", headers=world.headers(tl)
-        ).json()["items"]
-        == []
-    )
+    assert adjust(world, pc, "2026-10-06", checkOutTime="18:30").json()["approvalNote"] is None
     (item,) = world.client.get(
-        "/hr/v1/approvals/attendance-corrections", headers=world.headers(pm)
+        "/hr/v1/approvals/attendance-corrections", headers=world.headers(tl)
     ).json()["items"]
-    assert item["monthStats"]["averageMinutes"] == 390
-    assert len(world.mailer.sent) == 1
+    assert decide(world, tl, item["correctionId"]).json()["status"] == "APPROVED"
+    assert world.mailer.sent == []
+
+
+def test_a_team_leads_own_requests_go_to_the_pm_or_executive(world):
+    without_month_limits(world.engine)
+    emp, pc, tl, pm, ex = team(world)
+    hr = world.grant(str(uuid.uuid4()), perm.HR_EMPLOYEE_MANAGE)
+    lead_emp, lead = world.employee(hr)
+    world.assign(lead, "TL")
+    punch(world, lead, ist(2026, 10, 7, 11, 40), ist(2026, 10, 7, 19, 0))
+    world.clock.set(ist(2026, 10, 9, 12, 0))
+    asked = adjust(world, lead, "2026-10-07", checkInTime="10:20")
+    assert asked.json()["approvalNote"] == TEAM_LEAD_NOTE
+
+    # The other Team Lead sees neither the late check-in nor the correction, and cannot decide them.
+    for path in ("/hr/v1/approvals/attendance", "/hr/v1/approvals/attendance-corrections"):
+        assert world.client.get(path, headers=world.headers(tl)).json()["items"] == []
+    (late,) = world.client.get("/hr/v1/approvals/attendance", headers=world.headers(pm)).json()[
+        "items"
+    ]
+    assert late["approvalNote"] == TEAM_LEAD_NOTE
+    by_tl = world.client.post(
+        f"/hr/v1/approvals/attendance/{late['exceptionId']}/decision",
+        json={"decision": "APPROVE"},
+        headers=world.headers(tl),
+    )
+    assert by_tl.status_code == 404
+    (c,) = world.client.get(
+        "/hr/v1/approvals/attendance-corrections", headers=world.headers(ex)
+    ).json()["items"]
+    assert decide(world, tl, c["correctionId"]).status_code == 404
+    assert decide(world, ex, c["correctionId"]).json()["status"] == "APPROVED"
+    # The PC's requests still go to the Team Lead.
+    punch(world, pc, ist(2026, 10, 8, 11, 40), ist(2026, 10, 8, 19, 0))
+    assert world.client.get("/hr/v1/approvals/attendance", headers=world.headers(tl)).json()[
+        "items"
+    ]
+    # A Team Lead's own request never counts against a Team Lead at the Monday deadline.
+    with world.engine.begin() as conn:
+        conn.execute(
+            text("UPDATE hr.attendance_exception SET created_at = '2026-10-08T12:00:00+05:30'")
+        )
+    with world.engine.connect() as conn:
+        waiting = overdue_team_leads(conn, datetime(2026, 10, 19, 9, 0, tzinfo=IST))
+    assert [i["employeeName"] for i in waiting[tl]] == [emp["fullName"]]
 
 
 def test_escalated_requests_never_count_against_a_team_lead_at_the_deadline(world):

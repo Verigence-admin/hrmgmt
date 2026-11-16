@@ -1207,18 +1207,19 @@ def pending_attendance_exceptions(
         .mappings()
         .all()
     )
-    # When the person's month has passed an attendance limit, only a Project Manager or Executive
-    # decides (hrmgmt.attendance_month); each request says why.
+    # A Team Lead's own requests, and those of a month past the late/early limit, are decided only
+    # by a Project Manager or Executive (hrmgmt.attendance_month); each says why.
     stats = am.StatsCache(conn, now)
     decides: dict[tuple[str, bool], bool] = {}
     items = []
     for r in rows:
         eid = str(r["employee_id"])
         month = stats.get(eid, r["work_date"])
-        key = (eid, month.escalated)
+        route = stats.route(eid, r["work_date"])
+        key = (eid, route.pm_only)
         if key not in decides:
             decides[key] = decides_attendance(
-                conn, authorizer, user, eid, now, escalated=month.escalated
+                conn, authorizer, user, eid, now, escalated=route.pm_only
             )
         if r["kind"] == "NO_OUTLET_LOCATION":
             if not decides_attendance(conn, authorizer, user, eid, now, r["kind"]):
@@ -1248,7 +1249,7 @@ def pending_attendance_exceptions(
                 if r["kind"] in LATE_EARLY
                 else None,
                 "monthStats": month.view(),
-                "approvalNote": month.note() if r["kind"] != "NO_OUTLET_LOCATION" else None,
+                "approvalNote": route.note if r["kind"] != "NO_OUTLET_LOCATION" else None,
             }
         )
     return {"items": items}
@@ -1289,7 +1290,7 @@ def decide_attendance_exception(
     employee_id = str(row["employee_id"])
     escalated = (
         row["kind"] != "NO_OUTLET_LOCATION"
-        and am.month_stats(conn, employee_id, row["work_date"], clock()).escalated
+        and am.StatsCache(conn, clock()).route(employee_id, row["work_date"]).pm_only
     )
     if not decides_attendance(
         conn,

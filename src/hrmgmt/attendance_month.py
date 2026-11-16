@@ -10,13 +10,16 @@ For a calendar month, up to today:
 - Average hours a day: check-out minus check-in, over the full working days with both (Sundays,
   holidays, half-day holidays and half-day leave are left out, as they are short by design).
 
-Each person is expected to work `attendance.expected_daily_hours` (9) a day on average. When, in a
-month, the late and early time adds up to more than `attendance.escalate_late_early_hours` (10), or
-the average falls below `attendance.escalate_average_hours_below` (7), the person's attendance
-requests of that month (late, early, location and short-day exceptions, and attendance corrections)
-can be decided only by a Project Manager or Executive of their project (the CEO always; HR when
-the project has neither). Every such request carries a note saying why, and the person is told by
-email the first time it happens in a month.
+Each person is expected to work `attendance.expected_daily_hours` (9) a day on average; the
+average is shown, not enforced (product owner, 16 Nov 2026: "remove average rule"). When, in a
+month, the late and early time adds up to more than `attendance.escalate_late_early_hours` (10), the
+person's attendance requests of that month (late, early, location and short-day exceptions, and
+attendance corrections) can be decided only by a Project Manager or Executive of their project
+(the CEO always; HR when the project has neither). Every such request carries a note saying why,
+and the person is told by email the first time it happens in a month.
+
+A Team Lead's own attendance requests always go to a Project Manager or Executive (product owner,
+16 Nov 2026), never to another Team Lead: see `approval_route`.
 
 Times are those on the day as it stands, so an approved time correction counts. A day off
 (Sunday, declared holiday) is never late or early."""
@@ -38,7 +41,6 @@ from hrmgmt.timeutil import ist_date, parse_hhmm, to_ist
 logger = structlog.get_logger(__name__)
 
 LATE_EARLY_HOURS = "LATE_EARLY_HOURS"
-LOW_AVERAGE = "LOW_AVERAGE"
 NOTICE_TEMPLATE = "ATTENDANCE_ESCALATION"
 ESCALATED_ROLES = ("PM", "EXECUTIVE")
 
@@ -61,7 +63,6 @@ class MonthStats:
     minutes_clocked: int = 0
     expected_hours: int = 9
     limit_late_early_hours: int = 10
-    limit_average_hours: int = 7
     reasons: list[str] = field(default_factory=list)
 
     @property
@@ -82,19 +83,11 @@ class MonthStats:
         """Why the requests of this month go to a Project Manager or Executive, in plain words."""
         if not self.reasons:
             return None
-        month = f"{self.month:%B %Y}"
-        parts = []
-        if LATE_EARLY_HOURS in self.reasons:
-            parts.append(
-                f"late check-ins and early check-outs add up to {hm(self.late_early_minutes)} in"
-                f" {month} (more than {self.limit_late_early_hours} hours)"
-            )
-        if LOW_AVERAGE in self.reasons and self.average_minutes is not None:
-            parts.append(
-                f"the average is {hm(self.average_minutes)} a day in {month} (less than"
-                f" {self.limit_average_hours} hours; {self.expected_hours} hours a day are expected)"
-            )
-        return "Only a Project Manager or Executive can approve this: " + " and ".join(parts) + "."
+        return (
+            "Only a Project Manager or Executive can approve this: late check-ins and early"
+            f" check-outs add up to {hm(self.late_early_minutes)} in {self.month:%B %Y} (more than"
+            f" {self.limit_late_early_hours} hours)."
+        )
 
     def view(self) -> dict[str, Any]:
         average = self.average_minutes
@@ -109,10 +102,7 @@ class MonthStats:
             "daysClocked": self.days_clocked,
             "averageMinutes": average,
             "expectedHours": self.expected_hours,
-            "limits": {
-                "lateEarlyHours": self.limit_late_early_hours,
-                "averageHoursBelow": self.limit_average_hours,
-            },
+            "limits": {"lateEarlyHours": self.limit_late_early_hours},
             "escalated": self.escalated,
             "reasons": list(self.reasons),
             "note": self.note(),
@@ -146,7 +136,6 @@ def month_stats(
         to=last,
         expected_hours=int(values["attendance.expected_daily_hours"]),
         limit_late_early_hours=int(values["attendance.escalate_late_early_hours"]),
-        limit_average_hours=int(values["attendance.escalate_average_hours_below"]),
     )
     if last < first:
         return stats
@@ -192,27 +181,61 @@ def month_stats(
             stats.minutes_clocked += max(0, int((check_out_at - check_in_at).total_seconds() // 60))
     if stats.late_early_minutes > stats.limit_late_early_hours * 60:
         stats.reasons.append(LATE_EARLY_HOURS)
-    average = stats.average_minutes
-    if average is not None and average < stats.limit_average_hours * 60:
-        stats.reasons.append(LOW_AVERAGE)
     return stats
 
 
+TEAM_LEAD_NOTE = (
+    "Only a Project Manager or Executive can approve a Team Lead's attendance requests."
+)
+
+
+@dataclass(frozen=True)
+class ApprovalRoute:
+    """Who decides a person's attendance request of a given month: `pm_only` means a Project
+    Manager or Executive (not a Team Lead), with the note saying why."""
+
+    pm_only: bool
+    note: str | None
+
+
+def approval_route(
+    conn: Connection, employee_id: str, stats: MonthStats, at: datetime
+) -> ApprovalRoute:
+    """A Team Lead's own requests (product owner, 16 Nov 2026) and the requests of a month past the
+    late/early limit go to a Project Manager or Executive."""
+    from hrmgmt import workcontext as wc
+
+    if stats.escalated:
+        return ApprovalRoute(True, stats.note())
+    if "TL" in wc.project_roles(conn, employee_id, at):
+        return ApprovalRoute(True, TEAM_LEAD_NOTE)
+    return ApprovalRoute(False, None)
+
+
 class StatsCache:
-    """Month figures per (person, month) within one request, so a list of approvals works each
-    person's month out once."""
+    """Month figures and approval routes per (person, month) within one request, so a list of
+    approvals works each person's month out once."""
 
     def __init__(self, conn: Connection, now: datetime) -> None:
         self.conn = conn
         self.now = now
         self.values = cfg.load_all(conn)
         self._seen: dict[tuple[str, date], MonthStats] = {}
+        self._routes: dict[tuple[str, date], ApprovalRoute] = {}
 
     def get(self, employee_id: str, day: date) -> MonthStats:
         key = (employee_id, day.replace(day=1))
         if key not in self._seen:
             self._seen[key] = month_stats(self.conn, employee_id, day, self.now, self.values)
         return self._seen[key]
+
+    def route(self, employee_id: str, day: date) -> ApprovalRoute:
+        key = (employee_id, day.replace(day=1))
+        if key not in self._routes:
+            self._routes[key] = approval_route(
+                self.conn, employee_id, self.get(employee_id, day), self.now
+            )
+        return self._routes[key]
 
 
 # ---- telling the person ---------------------------------------------------------------------

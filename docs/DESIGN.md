@@ -409,10 +409,14 @@ and how early, measured to the standard check-out; and the average hours a day o
 days with a check-in and check-out. Shown on the employee's calendar and with every attendance
 approval.
 
-**Limits.** Expected: `attendance.expected_daily_hours` (9) a day on average. When, in a month, the
-late and early time adds up to more than `attendance.escalate_late_early_hours` (10), or the average
-is below `attendance.escalate_average_hours_below` (7), that month's attendance requests
-(exceptions and corrections) can be decided only by a **Project Manager or Executive** of the
-person's project (the CEO always; HR when the project has neither). Each such request carries the
-note saying why, the person sees it on their own requests, and they are emailed once a month the
-first time it happens. These requests never count against a Team Lead at the Monday deadline.
+**Limits.** Expected: `attendance.expected_daily_hours` (9) a day on average; the average is shown,
+not enforced (an average-hours limit was removed the same day). When, in a month, the late and early
+time adds up to more than `attendance.escalate_late_early_hours` (10), that month's attendance
+requests (exceptions and corrections) can be decided only by a **Project Manager or Executive** of
+the person's project (the CEO always; HR when the project has neither). Each such request carries
+the note saying why, the person sees it on their own requests, and they are emailed once a month
+the first time it happens.
+
+**A Team Lead's own attendance requests** always go to a Project Manager or Executive, never to
+another Team Lead of the project, with a note saying so. Neither kind ever counts against a Team
+Lead at the Monday deadline.

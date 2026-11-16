@@ -311,10 +311,7 @@ def without_month_limits(engine) -> None:
     """Sets the monthly attendance limits (hrmgmt.attendance_month) out of reach, for tests about
     something else in which one short or late day would otherwise pass them."""
     with engine.begin() as conn:
-        for key, value in (
-            ("attendance.escalate_average_hours_below", "1"),
-            ("attendance.escalate_late_early_hours", "100"),
-        ):
+        for key, value in (("attendance.escalate_late_early_hours", "100"),):
             conn.execute(
                 text(
                     "INSERT INTO hr.setting (key, value) VALUES (:k, CAST(:v AS jsonb))"
