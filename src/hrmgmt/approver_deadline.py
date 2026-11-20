@@ -4,18 +4,21 @@ At 09:00 IST every Monday, every Team Lead with an attendance, leave or claim re
 previous week (or earlier) still waiting on them has their whole Verigence access paused in Security
 until SuperAdmin restores it from myHR Settings. A request waits with every Team Lead of the
 person's project, so on a project with two Team Leads both are paused. Project Managers are not.
-Each Monday is processed once; a check that misses 09:00 (a restart) runs at the next check."""
+Each Monday is processed once. The job wakes at 09:00 by the clock and once when the service
+starts (a restart that missed 09:00); between the two it asks the database nothing."""
 
 from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Callable
 from datetime import datetime, time, timedelta
 from typing import Any
 
 import structlog
 from sqlalchemy import Connection, Engine, text
 
+from hrmgmt import sleep_window
 from hrmgmt.provisioning import ProvisioningError, UserProvisioner
 from hrmgmt.timeutil import IST, to_ist, utc_now
 
@@ -36,6 +39,11 @@ def latest_deadline(now: datetime) -> datetime:
     if local < deadline:
         deadline -= timedelta(days=7)
     return deadline
+
+
+def next_deadline(now: datetime) -> datetime:
+    """The first Monday 09:00 IST after `now`."""
+    return latest_deadline(now) + timedelta(days=7)
 
 
 def overdue_team_leads(conn: Connection, deadline: datetime) -> dict[str, list[dict[str, Any]]]:
@@ -107,12 +115,27 @@ def run_deadline(
 
 
 class WeeklyDeadline:
-    """Checks every ten minutes whether a Monday 09:00 deadline is unprocessed."""
+    """Runs the deadline at Monday 09:00 IST by the clock, and once when the service starts.
 
-    def __init__(self, engine: Engine, provisioner: UserProvisioner, *, every_s: float = 600.0):
+    It used to ask the database every ten minutes whether a deadline was unprocessed, day and
+    night, which alone kept the database from ever stopping at night (20 Nov 2026). The deadline
+    is a fixed time, so the job now waits for it without the database. Only a run that failed
+    (database or Security unreachable) is tried again ten minutes later, until it goes through."""
+
+    def __init__(
+        self,
+        engine: Engine,
+        provisioner: UserProvisioner,
+        *,
+        retry_s: float = 600.0,
+        start_delay_s: float = 60.0,
+        clock: Callable[[], datetime] = utc_now,
+    ):
         self._engine = engine
         self._provisioner = provisioner
-        self._every = every_s
+        self._retry = retry_s
+        self._start_delay = start_delay_s
+        self._clock = clock
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="hr-approver-deadline", daemon=True)
 
@@ -122,12 +145,27 @@ class WeeklyDeadline:
     def stop(self) -> None:
         self._stop.set()
 
+    def _attempt(self) -> bool:
+        try:
+            run_deadline(self._engine, self._provisioner, self._clock())
+        except Exception as exc:
+            logger.warning("hr_approver_deadline_error", error_type=type(exc).__name__)
+            return False
+        return True
+
+    def seconds_to_next(self) -> float:
+        """From now to a second past the next Monday 09:00 IST."""
+        now = self._clock()
+        return (next_deadline(now) - now).total_seconds() + 1.0
+
     def _loop(self) -> None:
-        if self._stop.wait(60):
+        # Let the service finish starting; then the deadline a restart may have missed. Started
+        # inside the night's sleep, that waits for the morning: 09:00 is after the window.
+        if self._stop.wait(self._start_delay + sleep_window.seconds_until_wake(self._clock())):
             return
+        done = self._attempt()
         while not self._stop.is_set():
-            try:
-                run_deadline(self._engine, self._provisioner)
-            except Exception as exc:
-                logger.warning("hr_approver_deadline_error", error_type=type(exc).__name__)
-            self._stop.wait(self._every)
+            retry = sleep_window.outside_sleep(self._retry, self._clock())
+            if self._stop.wait(self.seconds_to_next() if done else retry):
+                return
+            done = self._attempt()
