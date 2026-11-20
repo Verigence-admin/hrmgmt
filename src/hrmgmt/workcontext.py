@@ -18,6 +18,7 @@ import httpx
 import structlog
 from sqlalchemy import Connection, Engine, text
 
+from hrmgmt import sleep_window
 from hrmgmt.timeutil import utc_now
 
 logger = structlog.get_logger(__name__)
@@ -241,13 +242,29 @@ def report_leavers(engine: Engine, client: WorkContextClient) -> bool:
 
 
 class DailySync:
-    """Checks hourly whether the copy is more than a day old and refreshes it once if so.
-    A failed attempt waits for the next hourly check; nothing is retried in a loop."""
+    """Refreshes the copy once a day, by the clock.
 
-    def __init__(self, engine: Engine, client: WorkContextClient, *, check_every_s: float = 3600.0):
+    It used to ask the database every hour whether the copy was a day old, day and night; and as
+    each refresh came up to an hour later than the last, the refresh itself wandered round the
+    clock into the night (20 Nov 2026). Now the job reads when the copy was last refreshed once
+    at start and once when a refresh falls due, and asks the database nothing in between. A
+    refresh that falls due inside the night's sleep (hrmgmt.sleep_window) waits for the end of
+    it. A failed attempt is tried again an hour later; nothing is retried in a loop."""
+
+    def __init__(
+        self,
+        engine: Engine,
+        client: WorkContextClient,
+        *,
+        retry_s: float = 3600.0,
+        start_delay_s: float = 30.0,
+        clock: Callable[[], datetime] = utc_now,
+    ):
         self._engine = engine
         self._client = client
-        self._every = check_every_s
+        self._retry = retry_s
+        self._start_delay = start_delay_s
+        self._clock = clock
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="hr-work-sync", daemon=True)
 
@@ -257,19 +274,38 @@ class DailySync:
     def stop(self) -> None:
         self._stop.set()
 
+    def seconds_until_due(self) -> float:
+        """How long until the copy is a day old (one read); 0 when it already is, or never was
+        refreshed. A refresh HR ran by hand in the meantime counts."""
+        with self._engine.connect() as conn:
+            last = sync_status(conn).get("last_success_at")
+        if last is None:
+            return 0.0
+        return max(0.0, (last + DAILY - self._clock()).total_seconds())
+
+    def step(self) -> float:
+        """One turn: refresh if due, and return how long to wait before the next turn."""
+        now = self._clock()
+        asleep_for = sleep_window.seconds_until_wake(now)
+        if asleep_for > 0:  # started at night: nothing is read or refreshed before the morning
+            return asleep_for
+        wait = self._retry
+        try:
+            wait = self.seconds_until_due()
+            if wait <= 0:
+                refreshed = run_sync(self._engine, self._client).ok
+                wait = DAILY.total_seconds() if refreshed else self._retry
+        except Exception as exc:
+            logger.warning("hr_work_sync_loop_error", error_type=type(exc).__name__)
+        return max(1.0, sleep_window.outside_sleep(wait, now))
+
     def _loop(self) -> None:
         # Let the service finish starting before the first check.
-        if self._stop.wait(30):
+        if self._stop.wait(self._start_delay):
             return
         while not self._stop.is_set():
-            try:
-                with self._engine.connect() as conn:
-                    last = sync_status(conn).get("last_success_at")
-                if last is None or utc_now() - last >= DAILY:
-                    run_sync(self._engine, self._client)
-            except Exception as exc:
-                logger.warning("hr_work_sync_loop_error", error_type=type(exc).__name__)
-            self._stop.wait(self._every)
+            if self._stop.wait(self.step()):
+                return
 
 
 # ---- reading the copy -----------------------------------------------------------------------
