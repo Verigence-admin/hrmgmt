@@ -78,13 +78,12 @@ def leave_rule(
     """Who approves this person's leave: AUTO (the CEO's own), CEO, PM, TL_PM or HR.
 
     PC: any Team Lead or Project Manager of their project. Team Lead: a Project Manager.
-    Project Manager, HR and Finance staff: the CEO. Unpaid leave, and people with no project
-    role: HR. If the people the rule names do not exist, HR decides."""
+    Project Manager, HR and Finance staff: the CEO. People with no project role: HR. If the
+    people the rule names do not exist, HR decides. Unpaid leave follows the same route as paid
+    leave (product owner, 20 Nov 2026: a PC's unpaid leave goes to their Team Lead, not HR)."""
     user = wc.employee_user_id(conn, employee_id)
     if user is not None and is_ceo(authorizer, user):
         return "AUTO"
-    if leave_type == "UNPAID":
-        return "HR"
     if user is not None and (
         _holds(authorizer, user, perm.HR_LEAVE_REVIEW)
         or _holds(authorizer, user, perm.HR_CLAIM_REVIEW_FINANCE)

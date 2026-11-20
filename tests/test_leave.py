@@ -212,17 +212,21 @@ def test_a_team_lead_with_no_manager_falls_back_to_hr(world):
     assert decide(world, hr_reviewer, rid).status_code == 200
 
 
-def test_unpaid_leave_and_people_without_a_project_go_to_hr_and_the_ceo_records_without_approval(
+def test_unpaid_leave_follows_the_team_route_and_people_without_a_project_go_to_hr(
     world,
 ):
     _, pc = person(world, "PC")
     _, tl = person(world, "TL")
+    _, pm = person(world, "PM")
     hr_reviewer = world.grant(str(uuid.uuid4()), perm.HR_LEAVE_REVIEW)
     unpaid = apply(world, pc, leave_type="UNPAID", from_date="2026-10-06").json()
-    assert unpaid["approverRule"] == "HR"
-    assert decide(world, tl, unpaid["requestId"]).status_code == 404  # TL does not decide unpaid
-    assert decide(world, hr_reviewer, unpaid["requestId"]).status_code == 200
+    assert unpaid["approverRule"] == "TL_PM"  # a PC's unpaid leave goes to their Team Lead
+    assert decide(world, hr_reviewer, unpaid["requestId"]).status_code == 404  # not HR's
+    assert decide(world, tl, unpaid["requestId"]).status_code == 200
     assert balance(world, pc)["balance"] == 5.0  # unpaid touches no balance
+    tl_unpaid = apply(world, tl, leave_type="UNPAID", from_date="2026-10-07").json()
+    assert tl_unpaid["approverRule"] == "PM"  # a Team Lead's unpaid leave goes to the PM
+    assert decide(world, pm, tl_unpaid["requestId"]).status_code == 200
     _, staff = person(world, None)
     assert apply(world, staff, from_date="2026-10-06").json()["approverRule"] == "HR"
     _, boss = person(world, None, perms=[perm.HR_PAYROLL_APPROVE])
