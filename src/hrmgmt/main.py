@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from hrmgmt import sleep_window
 from hrmgmt.api.access_pauses import router as access_pauses_router
 from hrmgmt.api.admin import router as admin_router
 from hrmgmt.api.attendance import router as attendance_router
@@ -183,6 +184,8 @@ def app_factory() -> FastAPI:
 
         @asynccontextmanager
         async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+            # Whether Verigence is shut is Security's to say (the System shutdown tab), once a minute.
+            sleep_window.start_following(get_settings().security_base_url)
             for job in jobs:
                 job.start()
             try:

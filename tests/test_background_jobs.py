@@ -217,3 +217,116 @@ def test_a_refresh_hr_ran_by_hand_moves_the_next_one(monkeypatch):
     job._loop()
     assert copy.refreshes == []  # at 10:00 the copy is half an hour old: nothing to do yet
     assert job._stop.waits[-1] == pytest.approx(23.5 * 3600)  # type: ignore[attr-defined]
+
+
+# -- the shutdown switch (product owner, 21 Nov 2026) ------------------------------------------
+# Whether Verigence is shut is state held by Security (daily hours, Shut down now, Start now);
+# myHR's jobs wait by it, not by a clock of their own.
+
+
+def _status(**over):
+    return {
+        "closed": False,
+        "resting": False,
+        "hoursFromIst": "00:30",
+        "hoursToIst": "08:00",
+        "manual": None,
+        "manualSinceUtc": None,
+        "manualUntilUtc": None,
+        **over,
+    }
+
+
+def _z(moment):
+    return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _at(year, month, day, hour, minute=0):
+    return datetime(year, month, day, hour, minute, tzinfo=IST).astimezone(UTC)
+
+
+@pytest.fixture
+def switch(monkeypatch):
+    monkeypatch.setattr(sw, "WINDOW", NIGHT)
+    sw.unfollow()
+    yield
+    sw.unfollow()
+
+
+def test_until_security_answers_myhrs_own_setting_stands(switch):
+    assert sw.followed() is None
+    assert sw.in_window(_at(2026, 11, 22, 3)) and not sw.in_window(_at(2026, 11, 22, 14))
+    assert sw.seconds_until_wake(_at(2026, 11, 22, 7)) == 3600
+
+
+def test_the_hours_and_a_shutdown_by_hand_are_the_ones_security_says(switch):
+    assert sw.follow(_status(hoursFromIst="22:00", hoursToIst="07:30"))
+    assert sw.in_window(_at(2026, 11, 21, 23)) and not sw.in_window(_at(2026, 11, 22, 7, 30))
+    assert sw.seconds_until_wake(_at(2026, 11, 22, 7)) == 1800
+
+    six_pm, next_morning = _at(2026, 11, 21, 18), _at(2026, 11, 22, 8)
+    assert sw.follow(_status(resting=True, manual="SHUT", manualUntilUtc=_z(next_morning)))
+    assert sw.in_window(six_pm) and sw.seconds_until_wake(_at(2026, 11, 21, 20)) == 12 * 3600
+    assert not sw.in_window(next_morning)
+    # A job that would run at 7 pm waits for the opening, as it would at night.
+    assert sw.outside_sleep(3600, six_pm) == 3600 + 13 * 3600
+    # One that runs out inside the daily hours goes on to the morning.
+    assert sw.follow(_status(manual="SHUT", manualUntilUtc=_z(_at(2026, 11, 22, 2))))
+    assert sw.seconds_until_wake(_at(2026, 11, 22, 1)) == 7 * 3600
+    # Start now at three at night: no waiting until the morning's own opening has passed.
+    assert sw.follow(_status(manual="OPEN", manualUntilUtc=_z(next_morning)))
+    assert not sw.in_window(_at(2026, 11, 22, 3)) and sw.in_window(_at(2026, 11, 23, 0, 30))
+
+
+def test_an_answer_that_is_not_one_changes_nothing_and_a_failure_leaves_the_state(
+    switch, monkeypatch
+):
+    import httpx
+
+    assert sw.follow(_status(hoursFromIst="22:00", hoursToIst="07:30"))
+    before = sw.followed()
+    for bad in (
+        None,
+        "ok",
+        [],
+        {},
+        {"status": "ok"},
+        _status(hoursFromIst="ten"),
+        _status(hoursToIst="00:30"),
+    ):
+        assert not sw.follow(bad)
+        assert sw.followed() == before
+
+    answers = iter(
+        [
+            httpx.Response(200, json=_status()),
+            httpx.Response(503),
+            httpx.Response(200, text="<html>"),
+        ]
+    )
+    asked = []
+
+    def get(url, **_):
+        asked.append(url)
+        response = next(answers, None)
+        if response is None:
+            raise httpx.ConnectError("no route")
+        return response
+
+    monkeypatch.setattr(httpx, "get", get)
+    assert sw.ask("https://security.example/")
+    assert asked == ["https://security.example/security/v1/system/status"]
+    assert sw.followed().hours == NIGHT
+    for _ in range(3):
+        assert not sw.ask("https://security.example")
+        assert sw.followed().hours == NIGHT
+
+
+def test_with_nowhere_to_ask_or_told_never_to_sleep_myhr_keeps_its_own_setting(switch, monkeypatch):
+    monkeypatch.delenv("VERIGENCE_SHUTDOWN_SWITCH", raising=False)
+    assert sw.start_following("") is None
+    monkeypatch.setattr(sw, "WINDOW", None)
+    assert sw.start_following("https://security.example") is None
+    monkeypatch.setattr(sw, "WINDOW", NIGHT)
+    monkeypatch.setenv("VERIGENCE_SHUTDOWN_SWITCH", "off")
+    assert sw.start_following("https://security.example") is None
