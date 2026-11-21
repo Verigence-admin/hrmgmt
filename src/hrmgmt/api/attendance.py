@@ -254,6 +254,11 @@ def _record_event(
     # day, with its own times (product owner, 7 Nov 2026).
     holiday = hol.holiday_for(conn, employee_id, work_date)
     off_day = hol.is_off_day(work_date, holiday)
+    # A caution day (21 Nov 2026) is voluntary leave: whoever checks in works an ordinary day (and
+    # keeps the coming Sunday off), so it is not work on a day off and needs no approval.
+    caution = holiday is not None and holiday.caution
+    if caution:
+        off_day = False
     half = hol.half_day(work_date, holiday)
     values = hol.effective_values(base_values, half.day_part if half else None)
 
@@ -331,6 +336,10 @@ def _record_event(
         assignments=assignments,
         values=values,
     )
+    if caution and event == "CHECK_IN":
+        # Coming in on a caution day is voluntary: there is no late check-in to approve.
+        kinds[:] = [k for k in kinds if k != "LATE_CHECK_IN"]
+        flags[:] = [f for f in flags if f != "LATE"]
     if off_day:
         # Being late or early means nothing on a day off; working on it needs approval instead.
         kinds[:] = [k for k in kinds if k not in ("LATE_CHECK_IN", "EARLY_CHECK_OUT")]

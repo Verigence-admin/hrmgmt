@@ -16,6 +16,7 @@ from hrmgmt.api.attendance import router as attendance_router
 from hrmgmt.api.attendance_calendar import router as attendance_calendar_router
 from hrmgmt.api.attendance_corrections import router as attendance_corrections_router
 from hrmgmt.api.attendance_reports import router as attendance_reports_router
+from hrmgmt.api.attendance_summary import router as attendance_summary_router
 from hrmgmt.api.claims import router as claims_router
 from hrmgmt.api.contact_changes import router as contact_changes_router
 from hrmgmt.api.designation_salary_import import router as designation_salary_import_router
@@ -137,6 +138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(attendance_router)
     app.include_router(attendance_corrections_router)
     app.include_router(attendance_calendar_router)
+    app.include_router(attendance_summary_router)
     app.include_router(attendance_reports_router)
     app.include_router(leave_router)
     app.include_router(oversight_router)

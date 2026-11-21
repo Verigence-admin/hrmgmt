@@ -837,7 +837,10 @@ def test_a_working_sunday_is_an_ordinary_working_day_only_for_its_people(world):
     at(world, 10, 20, day=SUN)
     mine = world.client.get("/hr/v1/attendance/today", headers=world.headers(pc)).json()
     theirs = world.client.get("/hr/v1/attendance/today", headers=world.headers(other_user)).json()
-    assert mine["dayKind"] == "WORKING" and mine["workingSunday"] == {"name": "Stock audit Sunday"}
+    assert mine["dayKind"] == "WORKING" and mine["workingSunday"] == {
+        "name": "Stock audit Sunday",
+        "inPlaceOf": None,
+    }
     assert theirs["dayKind"] == "SUNDAY" and theirs["workingSunday"] is None
     assert send(world, pc, "in", token(world, pc)).json()["needsApproval"] == []  # not off-day work
     assert send(world, other_user, "in", token(world, other_user)).json()["needsApproval"] == [
@@ -881,7 +884,7 @@ def test_a_missed_working_sunday_is_an_absence_on_the_calendar(world):
     ).json()
     sunday = next(d for w in cal["weeks"] for d in w["days"] if d["date"] == "2026-11-15")
     assert sunday["dayKind"] == "WORKING" and sunday["status"] == "ABSENT"
-    assert sunday["workingSunday"] == {"name": "Stock audit Sunday"}
+    assert sunday["workingSunday"] == {"name": "Stock audit Sunday", "inPlaceOf": None}
 
 
 # ---- leave taken in the 6 weeks before a request (product owner, 7 Nov 2026) ----------------
