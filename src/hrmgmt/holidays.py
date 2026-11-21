@@ -15,6 +15,16 @@ Every Sunday is a day off unless a WORKING_DAY entry applies to the person (kind
 whole Sunday, declared, for the company or chosen projects/outlets; 7 Nov 2026). For those people
 that Sunday is an ordinary working day in everything below. A holiday that also applies wins.
 
+A caution day (kind CAUTION, 21 Nov 2026) is a day of bad weather, a cyclone or a strike on which
+the team is offered voluntary leave and asked to work the coming Sunday instead. HR or SuperAdmin
+declares it with a reason, for the company or chosen projects/outlets, and it always comes with its
+working Sunday (a WORKING_DAY row whose caution_id points at it, carrying the same reason). For a
+person in scope it depends on whether they checked in on the caution day:
+- did not check in: the caution day is a full-day holiday and the Sunday is a working day;
+- checked in: the caution day is an ordinary working day and the Sunday stays off for them, "in
+  lieu of" the caution day. No leave request is needed and no comp-off is earned for it.
+The markers CAUTION_WORKED and IN_LIEU say which, for display; they change nothing in the counting.
+
 On a half-day holiday the other half is a working day. The times of that working half come from
 `effective_values`: with the morning off the day starts at `attendance.half_day_split` (14:00) and a
 late check-in is judged from there; with the afternoon off the day ends at the split, and no
@@ -23,7 +33,7 @@ check-in by the split is an absence. The minimum hours are halved."""
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
@@ -39,6 +49,11 @@ DAY_PARTS = (FULL_DAY, MORNING, AFTERNOON)
 # Kinds of entry: a holiday, or a Sunday made a working day.
 HOLIDAY = "HOLIDAY"
 WORKING_DAY = "WORKING_DAY"
+CAUTION = "CAUTION"
+# Markers for a person who worked a caution day: that day is ordinary work, its Sunday is off.
+CAUTION_WORKED = "CAUTION_WORKED"
+IN_LIEU = "IN_LIEU"
+_MARKERS = (CAUTION_WORKED, IN_LIEU)
 DECLARED = "DECLARED"
 TENTATIVE = "TENTATIVE"
 ALL = "ALL"
@@ -55,6 +70,12 @@ class DayHoliday:
 
     day_part: str
     names: tuple[str, ...]
+    # A caution day that is a day off for this person (they did not check in on it).
+    caution: bool = False
+    # A working Sunday that stands in for a caution day: that caution day's date.
+    in_place_of: date | None = None
+    # A Sunday off in lieu of a caution day the person worked: that caution day's date.
+    in_lieu_of: date | None = None
 
     @property
     def name(self) -> str:
@@ -73,15 +94,27 @@ class DayHoliday:
         """A Sunday made a working day (no holiday applies on top)."""
         return self.day_part == WORKING_DAY
 
+    @property
+    def is_marker(self) -> bool:
+        """CAUTION_WORKED or IN_LIEU: shown on the day, counts as no entry at all."""
+        return self.day_part in _MARKERS
+
 
 def combine(parts: list[tuple[str, str]]) -> DayHoliday | None:
     """(day part, name) of every entry that applies -> what the day is. A full day wins; a morning
     off and an afternoon off together are a full day. A working-day entry (day part WORKING_DAY)
-    counts only when no holiday applies."""
+    counts only when no holiday applies; a marker (CAUTION_WORKED, IN_LIEU) only when nothing else
+    does."""
+    markers = [(p, n) for p, n in parts if p in _MARKERS]
+    parts = [(p, n) for p, n in parts if p not in _MARKERS]
     working = [n for p, n in parts if p == WORKING_DAY]
     parts = [(p, n) for p, n in parts if p != WORKING_DAY]
     if not parts:
-        return DayHoliday(WORKING_DAY, tuple(dict.fromkeys(working))) if working else None
+        if working:
+            return DayHoliday(WORKING_DAY, tuple(dict.fromkeys(working)))
+        if markers:
+            return DayHoliday(markers[0][0], tuple(dict.fromkeys(n for _, n in markers)))
+        return None
 
     def names(selected: list[str]) -> tuple[str, ...]:
         return tuple(dict.fromkeys(selected))
@@ -136,10 +169,39 @@ def working_fraction(day: date, holiday: DayHoliday | None) -> Decimal:
 
 
 def working_sunday_view(day: date, holiday: DayHoliday | None) -> dict[str, Any] | None:
-    """{"name": ...} when this Sunday is a working day for the person, else None."""
+    """{"name": ..., "inPlaceOf": caution date or None} when this Sunday is a working day for the
+    person, else None."""
     if not is_sunday(day) or holiday is None or not holiday.is_working_day:
         return None
-    return {"name": holiday.name}
+    return {
+        "name": holiday.name,
+        "inPlaceOf": holiday.in_place_of.isoformat() if holiday.in_place_of else None,
+    }
+
+
+def caution_view(day: date, holiday: DayHoliday | None) -> dict[str, Any] | None:
+    """What a caution day or its Sunday means for this person, for display, else None:
+    OFF (caution day off), WORKED (caution day worked), IN_LIEU (Sunday off in lieu of a worked
+    caution day) or SUNDAY_WORK (the Sunday to work in place of the caution day off)."""
+    if holiday is None:
+        return None
+    if holiday.caution:
+        return {"status": "OFF", "reason": holiday.name, "cautionDate": day.isoformat()}
+    if holiday.day_part == CAUTION_WORKED:
+        return {"status": "WORKED", "reason": holiday.name, "cautionDate": day.isoformat()}
+    if holiday.day_part == IN_LIEU and holiday.in_lieu_of:
+        return {
+            "status": "IN_LIEU",
+            "reason": holiday.name,
+            "cautionDate": holiday.in_lieu_of.isoformat(),
+        }
+    if holiday.is_working_day and holiday.in_place_of:
+        return {
+            "status": "SUNDAY_WORK",
+            "reason": holiday.name,
+            "cautionDate": holiday.in_place_of.isoformat(),
+        }
+    return None
 
 
 def half_day_view(holiday: DayHoliday | None, values: dict[str, Any]) -> dict[str, Any] | None:
@@ -274,6 +336,8 @@ class _Row:
     applies_to: str
     scope: tuple[tuple[str, str | None], ...]
     kind: str = HOLIDAY
+    # CAUTION: its own date. A WORKING_DAY standing in for a caution day: that caution day's date.
+    caution_day: date | None = None
 
 
 @dataclass(frozen=True)
@@ -292,9 +356,13 @@ def _load(conn: Connection, first: date, last: date, status: str) -> list[_Row]:
     rows = (
         conn.execute(
             text(
-                "SELECT holiday_id, holiday_date, name, day_part, applies_to, kind FROM hr.holiday"
-                " WHERE removed_at IS NULL AND status = :s"
-                " AND holiday_date >= :a AND holiday_date <= :b ORDER BY holiday_date, created_at"
+                "SELECT h.holiday_id, h.holiday_date, h.name, h.day_part, h.applies_to, h.kind,"
+                " CASE WHEN h.kind = 'CAUTION' THEN h.holiday_date ELSE c.holiday_date END"
+                " AS caution_day FROM hr.holiday h LEFT JOIN hr.holiday c"
+                " ON c.holiday_id = h.caution_id AND c.removed_at IS NULL"
+                " WHERE h.removed_at IS NULL AND h.status = :s"
+                " AND h.holiday_date >= :a AND h.holiday_date <= :b"
+                " ORDER BY h.holiday_date, h.created_at"
             ),
             {"s": status, "a": first, "b": last},
         )
@@ -323,6 +391,7 @@ def _load(conn: Connection, first: date, last: date, status: str) -> list[_Row]:
             applies_to=str(r["applies_to"]),
             scope=tuple(scope.get(str(r["holiday_id"]), [])),
             kind=str(r["kind"]),
+            caution_day=r["caution_day"],
         )
         for r in rows
     ]
@@ -365,17 +434,63 @@ def applies(row: _Row, assignments: list[_Assignment]) -> bool:
     return matches(row.scope, [a for a in assignments if a.valid_on(row.day)])
 
 
-def _resolve(rows: list[_Row], assignments: list[_Assignment]) -> dict[date, DayHoliday]:
+def _resolve(
+    rows: list[_Row], assignments: list[_Assignment], worked: frozenset[date] = frozenset()
+) -> dict[date, DayHoliday]:
+    """`worked`: the caution days on which this person checked in."""
     parts: dict[date, list[tuple[str, str]]] = defaultdict(list)
+    caution_off: set[date] = set()
+    in_place_of: dict[date, date] = {}
+    in_lieu_of: dict[date, date] = {}
     for r in rows:
-        if applies(r, assignments):
+        if not applies(r, assignments):
+            continue
+        if r.kind == CAUTION:
+            if r.day in worked:
+                parts[r.day].append((CAUTION_WORKED, r.name))
+            else:
+                parts[r.day].append((FULL_DAY, r.name))
+                caution_off.add(r.day)
+        elif r.kind == WORKING_DAY and r.caution_day is not None:
+            if r.caution_day in worked:
+                parts[r.day].append((IN_LIEU, r.name))
+                in_lieu_of[r.day] = r.caution_day
+            else:
+                parts[r.day].append((WORKING_DAY, r.name))
+                in_place_of[r.day] = r.caution_day
+        else:
             parts[r.day].append((WORKING_DAY if r.kind == WORKING_DAY else r.day_part, r.name))
     out: dict[date, DayHoliday] = {}
     for day, found in parts.items():
         combined = combine(found)
-        if combined is not None:
-            out[day] = combined
+        if combined is None:
+            continue
+        if combined.is_full and day in caution_off:
+            combined = replace(combined, caution=True)
+        elif combined.is_working_day and day in in_place_of:
+            combined = replace(combined, in_place_of=in_place_of[day])
+        elif combined.day_part == IN_LIEU:
+            combined = replace(combined, in_lieu_of=in_lieu_of[day])
+        out[day] = combined
     return out
+
+
+def caution_days_worked(
+    conn: Connection, employee_ids: list[str], days: set[date]
+) -> dict[str, frozenset[date]]:
+    """employee -> the caution days (of `days`) on which they checked in."""
+    out: dict[str, set[date]] = defaultdict(set)
+    if employee_ids and days:
+        for eid, day in conn.execute(
+            text(
+                "SELECT employee_id, work_date FROM hr.attendance_day"
+                " WHERE employee_id = ANY(CAST(:e AS uuid[])) AND work_date = ANY(:d)"
+                " AND check_in_at IS NOT NULL"
+            ),
+            {"e": employee_ids, "d": sorted(days)},
+        ):
+            out[str(eid)].add(day)
+    return {e: frozenset(v) for e, v in out.items()}
 
 
 def _user_ids(conn: Connection, employee_ids: list[str]) -> dict[str, str | None]:
@@ -413,10 +528,12 @@ def holidays_by_employee(
         if need_assignments
         else {}
     )
+    caution_days = {r.caution_day for r in rows if r.caution_day is not None}
+    worked = caution_days_worked(conn, employee_ids, caution_days) if caution_days else {}
     out: dict[str, dict[date, DayHoliday]] = {}
     for eid in employee_ids:
         user = users.get(eid)
-        out[eid] = _resolve(rows, found.get(user, []) if user else [])
+        out[eid] = _resolve(rows, found.get(user, []) if user else [], worked.get(eid, frozenset()))
     return out
 
 

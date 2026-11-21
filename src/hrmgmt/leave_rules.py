@@ -569,3 +569,83 @@ def special_info(conn: Connection, employee_id: str, today: date) -> dict[str, A
         "availableUntil": last.isoformat(),
         "nextOpensOn": (last + timedelta(days=1)).isoformat(),
     }
+
+
+# ---- leave raised before a day became a day off -----------------------------------------------
+
+
+def refresh_leave_days(conn: Connection, first: date, last: date, actor: str) -> int:
+    """Recounts the leave requests touching first..last after the holiday calendar changed there
+    (a holiday or a caution day declared, changed or removed; product owner, 21 Nov 2026).
+
+    Leave days are counted when a request is raised, so a day declared off afterwards would still
+    be charged. Pending requests take the new count, and one left with no working day is cancelled.
+    An approved request only ever gets days back (never charged more after approval): a paid one
+    is credited the difference in the ledger, and one left with nothing is cancelled.
+    Returns how many requests changed."""
+    rows = (
+        conn.execute(
+            text(
+                "SELECT request_id, employee_id, leave_type, from_date, to_date, half_day, days,"
+                " status FROM hr.leave_request WHERE status IN ('PENDING', 'APPROVED')"
+                " AND from_date <= :b AND to_date >= :a FOR UPDATE"
+            ),
+            {"a": first, "b": last},
+        )
+        .mappings()
+        .all()
+    )
+    changed = 0
+    for r in rows:
+        eid = str(r["employee_id"])
+        holidays = hol.holidays_for(conn, eid, r["from_date"], r["to_date"])
+        fractions = [
+            hol.working_fraction(d, holidays.get(d)) for d in _days(r["from_date"], r["to_date"])
+        ]
+        new = sum(fractions, _ZERO)
+        if r["half_day"]:
+            new = min(new, Decimal("0.5"))
+        old = Decimal(r["days"])
+        if new == old or (r["status"] == "APPROVED" and new > old):
+            continue
+        note = "No working day left in these dates: the day was declared off after the request"
+        if r["status"] == "APPROVED" and r["leave_type"] in PAID + LEGACY:
+            taken_year = conn.execute(
+                text(
+                    "SELECT leave_year FROM hr.leave_ledger WHERE request_id = CAST(:r AS uuid)"
+                    " AND entry_type = 'DEDUCT' ORDER BY created_at LIMIT 1"
+                ),
+                {"r": str(r["request_id"])},
+            ).scalar()
+            conn.execute(
+                text(
+                    "INSERT INTO hr.leave_ledger (employee_id, leave_type, leave_year, entry_type,"
+                    " days, request_id, note, created_by) VALUES (CAST(:e AS uuid), :t, :y,"
+                    " 'REVERSAL', :d, CAST(:r AS uuid), :n, :u)"
+                ),
+                {
+                    "e": eid,
+                    "t": r["leave_type"],
+                    "y": taken_year if taken_year is not None else r["from_date"].year,
+                    "d": old - new,
+                    "r": str(r["request_id"]),
+                    "n": "Day given back: declared off after the leave was approved",
+                    "u": actor,
+                },
+            )
+        if new == 0:
+            conn.execute(
+                text(
+                    "UPDATE hr.leave_request SET status = 'CANCELLED',"
+                    " decision_note = coalesce(decision_note || ' | ', '') || :n"
+                    " WHERE request_id = CAST(:r AS uuid)"
+                ),
+                {"r": str(r["request_id"]), "n": note},
+            )
+        else:
+            conn.execute(
+                text("UPDATE hr.leave_request SET days = :d WHERE request_id = CAST(:r AS uuid)"),
+                {"r": str(r["request_id"]), "d": new},
+            )
+        changed += 1
+    return changed

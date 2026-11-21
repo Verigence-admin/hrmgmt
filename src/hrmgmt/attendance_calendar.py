@@ -69,6 +69,9 @@ class Cell:
     holiday: str | None = None
     half_day_holiday: dict[str, Any] | None = None
     working_sunday: dict[str, Any] | None = None
+    # A caution day or its Sunday (21 Nov 2026): {"status": OFF / WORKED / IN_LIEU / SUNDAY_WORK,
+    # "reason", "cautionDate"}.
+    caution: dict[str, Any] | None = None
     check_in_at: datetime | None = None
     check_out_at: datetime | None = None
     minutes: int = 0
@@ -87,6 +90,7 @@ class Cell:
             "holiday": self.holiday,
             "halfDayHoliday": self.half_day_holiday,
             "workingSunday": self.working_sunday,
+            "caution": self.caution,
             "checkInAt": self.check_in_at.isoformat() if self.check_in_at else None,
             "checkOutAt": self.check_out_at.isoformat() if self.check_out_at else None,
             "minutes": self.minutes,
@@ -177,6 +181,7 @@ def cells(
             half = hol.half_day(day, holidays.get(day))
             cell.half_day_holiday = hol.half_day_view(half, values)
             cell.working_sunday = hol.working_sunday_view(day, holidays.get(day))
+            cell.caution = hol.caution_view(day, holidays.get(day))
             closed_today = hol.closed_for_check_in(now, half.day_part if half else None, values)
             record = records.get((eid, day))
             cell.leave = leave.get((eid, day))

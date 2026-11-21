@@ -5,7 +5,7 @@ leave and payroll is decided in hrmgmt.holidays (product owner, 7 Nov 2026)."""
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Connection, text
 
 from hrmgmt import holidays as hol
+from hrmgmt import leave_rules as lr
 from hrmgmt import permissions as perm
 from hrmgmt.api.attendance import get_clock
 from hrmgmt.audit import record_audit
@@ -37,7 +38,11 @@ _PART_WORDS = {"FULL_DAY": "full day", "MORNING": "morning off", "AFTERNOON": "a
 
 def _what(r: Any) -> str:
     """How the clash message names an entry: "full day", "morning off", "working Sunday"."""
-    return "working Sunday" if r["kind"] == hol.WORKING_DAY else _PART_WORDS[r["day_part"]]
+    if r["kind"] == hol.WORKING_DAY:
+        return "working Sunday"
+    if r["kind"] == hol.CAUTION:
+        return "caution day"
+    return _PART_WORDS[r["day_part"]]
 
 
 # ---- reading ---------------------------------------------------------------------------------
@@ -75,8 +80,15 @@ def _item(r: Any, scope: list[dict[str, Any]]) -> dict[str, Any]:
         "name": r["name"],
         "status": r["status"],
         "dayPart": r["day_part"],
-        # HOLIDAY, or WORKING_DAY: a Sunday made a working day (7 Nov 2026).
+        # HOLIDAY, WORKING_DAY (a Sunday made a working day, 7 Nov 2026) or CAUTION (a caution
+        # day, 21 Nov 2026). cautionId: on a working Sunday standing in for a caution day, that
+        # caution day; on a caution day, its own id.
         "kind": r["kind"],
+        "cautionId": (
+            str(r["holiday_id"])
+            if r["kind"] == hol.CAUTION
+            else (str(r["caution_id"]) if r["caution_id"] else None)
+        ),
         "appliesTo": r["applies_to"],
         "scope": scope,
         "updatedAt": r["updated_at"].isoformat() if r["updated_at"] else None,
@@ -87,8 +99,8 @@ def _live(conn: Connection, where: str, params: dict[str, Any]) -> list[Any]:
     return list(
         conn.execute(
             text(
-                "SELECT holiday_id, holiday_date, name, status, day_part, applies_to, kind, updated_at"
-                f" FROM hr.holiday WHERE removed_at IS NULL AND {where}"
+                "SELECT holiday_id, holiday_date, name, status, day_part, applies_to, kind,"
+                f" caution_id, updated_at FROM hr.holiday WHERE removed_at IS NULL AND {where}"
                 " ORDER BY holiday_date, CASE day_part WHEN 'FULL_DAY' THEN 0"
                 " WHEN 'MORNING' THEN 1 ELSE 2 END, applies_to, lower(name)"
             ),
@@ -103,8 +115,9 @@ def _one(conn: Connection, holiday_id: str, *, lock: bool = False) -> dict[str, 
     row = (
         conn.execute(
             text(
-                "SELECT holiday_id, holiday_date, name, status, day_part, applies_to, kind, updated_at"
-                " FROM hr.holiday WHERE holiday_id = CAST(:h AS uuid) AND removed_at IS NULL"
+                "SELECT holiday_id, holiday_date, name, status, day_part, applies_to, kind,"
+                " caution_id, updated_at FROM hr.holiday"
+                " WHERE holiday_id = CAST(:h AS uuid) AND removed_at IS NULL"
                 + (" FOR UPDATE" if lock else "")
             ),
             {"h": holiday_id},
@@ -154,8 +167,8 @@ def list_holidays(
     A TENTATIVE date is only a proposal: only declared ones count as non-working days.
 
     Each item keeps date, name and status as before, with holidayId, dayPart, appliesTo, kind and
-    scope. Working Sundays (kind WORKING_DAY) are listed only with includeWorkingDays=true, so an
-    earlier app version never shows one as a holiday."""
+    scope. Working Sundays (kind WORKING_DAY) and caution days (kind CAUTION) are listed only with
+    includeWorkingDays=true, so an earlier app version never meets a kind it does not know."""
     rows = _live(
         conn,
         "(CAST(:y AS int) IS NULL OR extract(year FROM holiday_date) = :y)"
@@ -400,14 +413,15 @@ def _create(
     applies_to: str,
     scope: list[dict[str, Any]],
     kind: str = hol.HOLIDAY,
+    caution_id: str | None = None,
 ) -> dict[str, Any]:
     _check_clash(conn, day, day_part, applies_to, scope)
     holiday_id = str(
         conn.execute(
             text(
                 "INSERT INTO hr.holiday (holiday_date, name, status, day_part, applies_to, kind,"
-                " created_by, updated_by) VALUES (:d, :n, :s, :p, :a, :k, :u, :u)"
-                " RETURNING holiday_id"
+                " caution_id, created_by, updated_by)"
+                " VALUES (:d, :n, :s, :p, :a, :k, CAST(:c AS uuid), :u, :u) RETURNING holiday_id"
             ),
             {
                 "d": day,
@@ -416,11 +430,13 @@ def _create(
                 "p": day_part,
                 "a": applies_to,
                 "k": kind,
+                "c": caution_id,
                 "u": user.user_id,
             },
         ).scalar_one()
     )
     _write_scope(conn, holiday_id, scope)
+    lr.refresh_leave_days(conn, day, day, user.user_id)
     item = _one(conn, holiday_id)
     assert item is not None
     record_audit(
@@ -469,6 +485,8 @@ def _change(
         },
     )
     _write_scope(conn, holiday_id, scope)
+    old_day = date.fromisoformat(before["date"])
+    lr.refresh_leave_days(conn, min(old_day, day), max(old_day, day), user.user_id)
     after = _one(conn, holiday_id)
     assert after is not None
     if _audit_view(before) != _audit_view(after):
@@ -487,6 +505,22 @@ def _change(
 def _remove(
     conn: Connection, request: Request, user: HumanPrincipal, before: dict[str, Any], now: datetime
 ) -> None:
+    _remove_one(conn, request, user, before, now)
+    # A caution day and its working Sunday come and go together.
+    if before["cautionId"]:
+        for r in _live(
+            conn,
+            "(holiday_id = CAST(:c AS uuid) OR caution_id = CAST(:c AS uuid))",
+            {"c": before["cautionId"]},
+        ):
+            other = _one(conn, str(r["holiday_id"]), lock=True)
+            if other is not None:
+                _remove_one(conn, request, user, other, now)
+
+
+def _remove_one(
+    conn: Connection, request: Request, user: HumanPrincipal, before: dict[str, Any], now: datetime
+) -> None:
     conn.execute(
         text(
             "UPDATE hr.holiday SET removed_at = :n, removed_by = :u, updated_at = :n,"
@@ -503,6 +537,8 @@ def _remove(
         changes={"before": _audit_view(before), "after": None},
         request=request,
     )
+    day = date.fromisoformat(before["date"])
+    lr.refresh_leave_days(conn, day, day, user.user_id)
 
 
 def _kind_ok(body: HolidayEntryIn) -> None:
@@ -546,6 +582,79 @@ def add_holiday(
     )
 
 
+class CautionDayIn(BaseModel):
+    """A caution day (product owner, 21 Nov 2026): bad weather, a cyclone or a strike. The team is
+    offered voluntary leave and works the coming Sunday instead; whoever works the caution day
+    keeps that Sunday off. `reason` is shown on both days."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, populate_by_name=True)
+    caution_date: date = Field(alias="date")
+    reason: str = Field(min_length=2, max_length=120)
+    working_sunday: date | None = Field(default=None, alias="workingSunday")
+    applies_to: AppliesTo = Field(default="SELECTED", alias="appliesTo")
+    scope: list[ScopeIn] = Field(default_factory=list, max_length=500)
+
+
+def next_sunday(day: date) -> date:
+    return day + timedelta(days=6 - day.weekday() or 7)
+
+
+@router.post("/holidays/caution", status_code=201)
+def add_caution_day(
+    body: CautionDayIn,
+    request: Request,
+    user: HumanPrincipal = Depends(can_manage),
+    conn: Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """HR or SuperAdmin: declares a caution day and, with the same reason and the same people, the
+    Sunday to work in its place (the coming Sunday unless another is chosen)."""
+    day = body.caution_date
+    _year_ok(day)
+    if day.weekday() == 6:
+        raise _invalid("A caution day cannot be a Sunday: Sunday is already off.")
+    sunday = body.working_sunday or next_sunday(day)
+    if sunday.weekday() != 6 or sunday <= day:
+        raise _invalid("The working day in its place must be a Sunday after the caution day.")
+    if (sunday - day).days > 31:
+        raise _invalid("Choose a working Sunday within a month of the caution day.")
+    entry = HolidayEntryIn.model_validate(
+        {
+            "date": day,
+            "name": body.reason,
+            "status": hol.DECLARED,
+            "appliesTo": body.applies_to,
+            "scope": [s.model_dump(by_alias=True) for s in body.scope],
+        }
+    )
+    scope = _labelled_scope(conn, entry)
+    caution = _create(
+        conn,
+        request,
+        user,
+        day=day,
+        name=body.reason,
+        status=hol.DECLARED,
+        day_part=hol.FULL_DAY,
+        applies_to=body.applies_to,
+        scope=scope,
+        kind=hol.CAUTION,
+    )
+    working = _create(
+        conn,
+        request,
+        user,
+        day=sunday,
+        name=body.reason,
+        status=hol.DECLARED,
+        day_part=hol.FULL_DAY,
+        applies_to=body.applies_to,
+        scope=scope,
+        kind=hol.WORKING_DAY,
+        caution_id=caution["holidayId"],
+    )
+    return {"caution": caution, "workingSunday": working}
+
+
 def _found(conn: Connection, holiday_id: str) -> dict[str, Any]:
     try:
         hid = str(uuid.UUID(holiday_id))
@@ -566,6 +675,11 @@ def change_holiday(
     conn: Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     before = _found(conn, holiday_id)
+    if before["cautionId"]:
+        raise _invalid(
+            "A caution day and its working Sunday are changed together: remove the caution day"
+            " and declare it again."
+        )
     _year_ok(body.holiday_date)
     _kind_ok(body)
     scope = _labelled_scope(conn, body)
